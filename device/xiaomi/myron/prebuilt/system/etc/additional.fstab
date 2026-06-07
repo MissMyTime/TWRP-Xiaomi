@@ -1,0 +1,16 @@
+# additional.fstab - Redmi K90 Pro Max / myron
+# Clean Android fs_mgr fstab for metadata-encrypted userdata decrypt.
+#
+# Actual partition mapping verified:
+#   metadata -> /dev/block/sda20
+#   userdata -> /dev/block/sda34
+#
+# Use stable by-name paths, not raw sdaXX or generated dm-XX mapper.
+
+#<src>                                      <mnt_point>  <type>  <mnt_flags and options>                                                        <fs_mgr_flags>
+
+/dev/block/bootdevice/by-name/metadata      /metadata    f2fs    noatime,nosuid,nodev,discard                                                   wait,first_stage_mount
+
+/dev/block/bootdevice/by-name/persist       /mnt/vendor/persist    ext4    noatime,nosuid,nodev,barrier=1                                      wait
+
+/dev/block/bootdevice/by-name/userdata      /data        f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt,atgc    wait,quota,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
