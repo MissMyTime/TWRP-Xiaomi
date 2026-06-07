@@ -1,0 +1,9 @@
+{
+    "term": {
+        "sign_tee": "6m",
+        "sign_non_tee": "6m",
+        "tsa": "6m"
+    },
+    "feature_license_path": "/vendor/etc/ssg/license.txt",
+    "cloud_credential": "..."
+}

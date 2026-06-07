@@ -1,0 +1,11 @@
+{
+    "url": {
+        "qwes_nonce": "https://api.qwes.qualcomm.com/api/d2c/1.0/nonces",
+        "qwes_token_cert": "https://api.qwes.qualcomm.com/api/d2c/1.0/token-certificates/RSA",
+        "ca_csr_server": "https://lens-api.truepic.com/enrollments"
+    },
+    "config": {
+        "network_timeout_in_sec": 5,
+        "network_retry_attempt": 5
+    }
+}
