@@ -1,0 +1,31 @@
+# system.prop — Xiaomi 17 Ultra / nezha
+# TWRP 16 on AOSP android-16.0.0_r1
+# SPDX-License-Identifier: Apache-2.0
+
+# Device identity
+ro.product.device=nezha
+ro.product.name=nezha
+ro.product.board=canoe
+ro.product.brand=Xiaomi
+ro.product.model=Xiaomi 17 Ultra
+ro.product.manufacturer=Xiaomi
+
+# Platform
+ro.board.platform=canoe
+ro.hardware=qcom
+
+# CPU ABI
+ro.product.cpu.abilist=arm64-v8a
+ro.product.cpu.abi=arm64-v8a
+
+# Build fingerprint (from stock ROM)
+ro.build.fingerprint=Xiaomi/nezha/nezha:16/BP2A.250605.031.A3/OS3.0.303.0.WPACNXM:user/release-keys
+
+# Display
+ro.sf.lcd_density=480
+ro.minui.pixel_format=RGBX_8888
+ro.minui.overscan_percent=0
+
+# USB recovery identifiers
+ro.recovery.usb.vid=18D1
+ro.recovery.usb.adb.pid=D001

@@ -1,0 +1,9 @@
+# recovery.te — nezha recovery
+# SPDX-License-Identifier: Apache-2.0
+
+permissive recovery;
+permissive hal_vibrator_default;
+
+type vendor_fingerprint_data_file, file_type, data_file_type;
+
+hal_client_domain(recovery, hal_vibrator)

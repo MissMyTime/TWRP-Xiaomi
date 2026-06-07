@@ -1,0 +1,88 @@
+<!--
+    Combined platform manifest for sm8850/canoe — TWRP 16
+    TWRP looks for manifest_sm8850.xml (platform-specific) first,
+    then falls back to manifest.xml.
+-->
+<manifest version="9.0" type="device">
+    <!-- KeyMint v4 (AIDL) — TWRP 16 looks for "android.hardware.keymaster" in VINTF -->
+    <hal format="aidl">
+        <name>android.hardware.security.keymint</name>
+        <version>4</version>
+        <fqname>IKeyMintDevice/default</fqname>
+    </hal>
+
+    <!-- Legacy Keymaster HIDL (for TWRP keymaster version detection) -->
+    <hal format="hidl">
+        <name>android.hardware.keymaster</name>
+        <transport>hwbinder</transport>
+        <version>4.1</version>
+        <interface>
+            <name>IKeymasterDevice</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+    <hal format="aidl">
+        <name>android.hardware.security.keymint</name>
+        <version>3</version>
+        <fqname>IRemotelyProvisionedComponent/default</fqname>
+    </hal>
+
+    <!-- Gatekeeper -->
+    <hal format="aidl">
+        <name>android.hardware.gatekeeper</name>
+        <fqname>IGatekeeper/default</fqname>
+    </hal>
+
+    <!-- Secretkeeper -->
+    <hal format="aidl">
+        <name>android.hardware.security.secretkeeper</name>
+        <fqname>ISecretkeeper/default</fqname>
+    </hal>
+
+    <!-- SecureClock -->
+    <hal format="aidl">
+        <name>android.hardware.security.secureclock</name>
+        <fqname>ISecureClock/default</fqname>
+    </hal>
+
+    <!-- SharedSecret -->
+    <hal format="aidl">
+        <name>android.hardware.security.sharedsecret</name>
+        <fqname>ISharedSecret/default</fqname>
+    </hal>
+
+    <!-- Secure Element -->
+    <hal format="aidl">
+        <name>android.hardware.secure_element</name>
+        <fqname>ISecureElement/eSE1</fqname>
+    </hal>
+
+    <!-- OMAPI SE -->
+    <hal format="aidl">
+        <name>android.se.omapi</name>
+        <fqname>ISecureElementService/default</fqname>
+    </hal>
+
+    <!-- Boot control -->
+    <hal format="aidl">
+        <name>android.hardware.boot</name>
+        <fqname>IBootControl/default</fqname>
+    </hal>
+
+    <!-- Health -->
+    <hal format="hidl">
+        <name>android.hardware.health</name>
+        <transport>hwbinder</transport>
+        <version>2.1</version>
+        <interface>
+            <name>IHealth</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <!-- Weaver (NXP — declared in ODM, but TWRP reads vendor manifest) -->
+    <hal format="aidl">
+        <name>android.hardware.weaver</name>
+        <fqname>IWeaver/default</fqname>
+    </hal>
+</manifest>

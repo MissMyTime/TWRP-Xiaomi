@@ -1,0 +1,159 @@
+# init.recovery.qcom.rc — Redmi K90 Pro Max / myron
+# TWRP 16 / SM8850 / canoe / NXP KeyMint / Virtual A/B
+# SPDX-License-Identifier: Apache-2.0
+
+import /init.recovery.logd.rc
+import /init.recovery.ldconfig.rc
+import /init.recovery.usb.rc
+import /init.recovery.service.rc
+import /init.recovery.hlthchrg.rc
+import /init.recovery.wifi.rc
+
+# -----------------------------------------------------------------------------
+# Init sequence:
+#   late-init → early-fs → fs → post-fs → firmware → boot
+#   boot → class_start default → class_start hal
+#
+# All vendor HAL services (keymint, gatekeeper, boot, health, qseecomd, etc.)
+# are defined in /vendor/etc/init/*.rc with class hal / early_hal / core,
+# and are started automatically by class_start in the main init.rc.
+#
+# ODM services (strongbox.nxp, weaver.nxp, vibrator, touch) are defined in
+# /odm/etc/init/*.rc, also auto-started by class_start hal.
+# -----------------------------------------------------------------------------
+
+on early-fs
+    write /proc/sys/walt/sched_lib_name "recovery,magiskboot,Updater,updater,update_engine_sideload"
+    write /proc/sys/walt/sched_lib_mask_force 255
+
+on init
+    start vendor.boot-qti
+
+on fs
+    # Stable bootdevice path
+    wait /dev/block/platform/soc/${ro.boot.bootdevice}
+    symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
+
+    # Required for firmware sysfs fallback in recovery
+    write /proc/sys/kernel/firmware_config/force_sysfs_fallback 1
+
+    # QSEECom / KeyMint TA access
+    chmod 0660 /dev/qseecom
+    chown system drmrpc /dev/qseecom
+    chmod 0664 /dev/ion
+    chown system system /dev/ion
+
+    # Mount persist for KeyMint / QSEE credentials
+    mkdir /mnt/vendor 0775 shell system
+    mkdir /mnt/vendor/persist 0775 shell system
+    wait /dev/block/bootdevice/by-name/persist
+    mount ext4 /dev/block/bootdevice/by-name/persist /persist noatime nosuid nodev barrier=1
+    mount none /persist /mnt/vendor/persist bind
+
+    # Mount firmware for QSEE TA images
+    mkdir /vendor/firmware_mnt 0755 root root
+    mkdir /firmware 0755 root root
+
+    # myron uses NXP KeyMint (same as popsicle)
+    setprop ro.keymint nxp
+
+    # Gatekeeper config for QTI TEE-based GK (not SPU-based)
+    setprop vendor.gatekeeper.disable_spu true
+    setprop vendor.gatekeeper.is_security_level_spu 0
+
+on boot
+    # ADB over USB
+    setprop sys.usb.config adb
+    setprop sys.usb.configfs 1
+
+    chmod 0755 /sbin/iw
+    chmod 0755 /sbin/wifi-dhcp.sh
+    chmod 0755 /sbin/wifi-load-modules.sh
+    chmod 0755 /sbin/wpa_cli
+    chmod 0755 /sbin/wpa_supplicant
+
+on property:ro.boot.usbcontroller=*
+    setprop sys.usb.controller ${ro.boot.usbcontroller}
+
+# -----------------------------------------------------------------------------
+# Post-module-load setup
+# TWRP sets twrp.modules.loaded=true after loading kernel modules.
+# -----------------------------------------------------------------------------
+on property:twrp.modules.loaded=true
+    # Mount modem firmware (slot-aware)
+    mount vfat /dev/block/bootdevice/by-name/modem${ro.boot.slot_suffix} /vendor/firmware_mnt ro
+    mount none /vendor/firmware_mnt /firmware bind
+    chmod 0755 /sbin/iw
+    chmod 0755 /sbin/wifi-dhcp.sh
+    chmod 0755 /sbin/wifi-load-modules.sh
+    chmod 0755 /sbin/wpa_cli
+    chmod 0755 /sbin/wpa_supplicant
+
+    # Load ADSP for PMIC
+    wait /sys/kernel/boot_adsp/boot
+    write /sys/kernel/boot_adsp/boot 1
+    wait /sys/kernel/boot_adsp/ssr
+    write /sys/kernel/boot_adsp/ssr 1
+
+    # Wait for battery path
+    wait /sys/class/power_supply/battery
+
+    # QSEE / SMCInvoke nodes for KeyMint
+    wait /dev/smcinvoke
+    chown system drmrpc /dev/smcinvoke
+    chmod 0660 /dev/smcinvoke
+
+    wait /dev/qsee_ipc_irq_spss
+    chown system drmrpc /dev/qsee_ipc_irq_spss
+    chmod 0660 /dev/qsee_ipc_irq_spss
+
+    chmod 0444 /dev/dma_heap/qcom,qseecom
+    chmod 0444 /dev/dma_heap/qcom,qseecom-ta
+    chmod 0444 /dev/dma_heap/qcom,system
+    chmod 0444 /dev/dma_heap/system
+
+    # NXP eSE / Weaver NFC transport
+    insmod /vendor/lib/modules/stm_nfc_i2c.ko
+    insmod /vendor/lib/modules/nxp-nci.ko
+    insmod /tmp/vendor/lib/modules/stm_nfc_i2c.ko
+    insmod /tmp/vendor/lib/modules/nxp-nci.ko
+
+    # Touch: force normal coordinate reporting mode (disable raw/THP)
+    wait /sys/class/touch/touch_dev/enable_touch_raw
+    start touch-raw-guard
+
+    # Start health HAL for battery monitoring
+    start vendor.health-default
+    # Recovery drives qcom-hv-haptics directly through input force-feedback.
+    # Do not start Xiaomi AIDL vibrator HAL; it can mask direct haptics fallback.
+
+    # Keep firmware mounted: WLAN firmware fallback loads IPA/CNSS blobs from
+    # /firmware/image when the WiFi driver is started from recovery UI.
+
+on property:servicemanager.ready=true
+    setprop sys.boot_completed 1
+
+on property:sys.boot_completed=1
+    start myron-nxp-gate
+
+# -----------------------------------------------------------------------------
+# myron-specific services
+# -----------------------------------------------------------------------------
+
+# Keep FocalTech in normal input-reporting mode
+# enable_touch_raw=1 blocks normal getevent coordinates
+service touch-raw-guard /system/bin/sh -c \
+    "while true; do echo 0 > /sys/class/touch/touch_dev/enable_touch_raw 2>/dev/null; sleep 1; done"
+    class main
+    user root
+    group root system input
+    oneshot
+    seclabel u:r:recovery:s0
+
+# Start NXP eSE/Weaver in the same order as the working Xiaomi 17 Pro Max TWRP.
+service myron-nxp-gate /system/bin/myron-nxp-gate.sh
+    disabled
+    oneshot
+    user root
+    group root shell
+    seclabel u:r:recovery:s0
