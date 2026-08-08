@@ -1,0 +1,91 @@
+name: Build TWRP for myron
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: twrp-myron-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WORK_DIR: ${{ github.workspace }}/work
+  DEVICE: myron
+  CCACHE_SIZE: 10G
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache /usr/share/swift
+          docker system prune -af || true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git-core gnupg gperf lib32ncurses-dev lib32z1-dev libc6-dev-i386 \
+            libgl1-mesa-dev liblz4-tool libncurses-dev libssl-dev libxml2-utils \
+            lz4 python3 rsync unzip x11proto-core-dev xsltproc zip zlib1g-dev zstd
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod 0755 "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize source
+        run: |
+          mkdir -p "$WORK_DIR"
+          cd "$WORK_DIR"
+          repo init --depth=1 --no-clone-bundle --no-tags \
+            -u https://github.com/TWRP-Test/platform_manifest_twrp_aosp.git \
+            -b twrp-16.0
+          repo sync -c -j4 --fail-fast --no-tags --no-clone-bundle
+
+      - name: Apply shared source changes
+        run: |
+          git clone --depth=1 -b main \
+            https://github.com/MissMyTime/TWRP-Xiaomi.git "$RUNNER_TEMP/twrp-common"
+          rsync -a "$RUNNER_TEMP/twrp-common/source_changes/files/" "$WORK_DIR/"
+
+      - name: Install device tree
+        run: |
+          git clone --depth=1 -b myron \
+            https://github.com/MissMyTime/TWRP-Xiaomi.git "$RUNNER_TEMP/twrp-myron"
+          mkdir -p "$WORK_DIR/device/xiaomi/myron"
+          rsync -a --delete \
+            "$RUNNER_TEMP/twrp-myron/device/xiaomi/myron/" \
+            "$WORK_DIR/device/xiaomi/myron/"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: myron-twrp16-${{ github.run_id }}
+          restore-keys: myron-twrp16-
+
+      - name: Build recovery
+        run: |
+          cd "$WORK_DIR"
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export USE_CCACHE=1
+          ccache -M "$CCACHE_SIZE"
+          source build/envsetup.sh
+
+          lunch twrp_myron-bp2a-eng
+
+          m -j2 recoveryimage
+
+      - name: Upload recovery image
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWRP-myron-${{ github.run_id }}
+          path: ${{ env.WORK_DIR }}/out/target/product/${{ env.DEVICE }}/recovery.img
+          if-no-files-found: error

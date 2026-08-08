@@ -1,118 +1,80 @@
-# Redmi K90 Pro Max / myron TWRP 设备树改动说明
+# Redmi K90 Pro Max / POCO F8 Ultra (myron)
 
-本设备树用于 Redmi K90 Pro Max / myron 的 TWRP 3.7.1 Android 16 适配。
+本设备树用于 Myron 的 TWRP 3.7.1 Android 16 构建，目标系统为 HyperOS 3 / Android 16，支持 FBE、动态分区和 Virtual A/B。
 
 ## 当前状态
 
-- 基础功能：可启动 TWRP，触摸、亮度、解密、MTP、ADB、WiFi、手电、振动均已适配。
-- 分区形态：独立 recovery 分区，支持 `fastboot flash recovery recovery.img`。
-- 目标系统：HyperOS 3 / Android 16，FBE metadata 加密，动态分区，Virtual A/B。
-- 真解锁 BL 环境可正常刷入和使用。
-- 假回锁 BL 环境依赖对应 ABL/GBL/AVB 信任链，不保证直接兼容第三方 recovery。
+- Recovery：独立 A/B recovery 分区，镜像不包含内核。
+- 解密：QTI KeyMint、NXP StrongBox/Weaver、Android 16 FBE。
+- 存储：Data/Metadata 使用 F2FS，内部存储按 `/data/media` 处理。
+- 连接：ADB、MTP、ADB Sideload、WLAN。
+- 硬件：触摸、亮度、振动。
+- 刷机：传统 update-binary、官方 A/B OTA、动态分区镜像。
 
-## 设备树内主要改动
+## 2026-07-28 至 2026-07-29 修复
 
-### BoardConfig.mk
+### 解密与存储
 
-- 配置 myron 基础板级参数、分辨率、亮度路径、温度路径、电池路径。
-- 启用 FBE / metadata decrypt 相关选项，使 TWRP 可以解密 Android 16 的 `/data`。
-- 增加 WiFi、MTP、ADB、fastbootd、dynamic partitions、recovery 独立分区等配置。
-- 加载 recovery 所需 vendor modules，包括触摸、USB、WiFi、充电、电池、手电、haptics 等模块。
-- 移除会导致振动卡顿或输入异常的 haptics blacklist 配置。
+- 调整 NXP KeyMint/Weaver 启动顺序，降低官方系统和 AOSP 系统偶发卡解密、密码类型误判的概率。
+- 解密成功后直接建立内部存储映射，避免递归扫描 `/data` 导致首页等待。
+- 移除重复 USB-OTG 定义，避免内部存储被误显示为 USB-OTG。
+- 区分 Data、Internal Storage、Dalvik/ART Cache 等虚拟项目；文件系统操作必须选择真实 Data 分区。
+- 保留 Data、Metadata 的 F2FS 检查、修复和格式化工具。
 
-### recovery.fstab
+### 安装、动态分区与格式化
 
-- 按 myron 实机分区调整 `/data`、`/metadata`、`/super`、`/misc` 等挂载项。
-- 对 Android 16 FBE metadata 加密参数进行适配。
-- 移除会触发 stock recovery 兼容性风险的部分自动 check / formattable 配置。
-- 保留动态分区和 Virtual A/B 相关必要挂载信息。
+- 补齐 `/sbin/sh`、`/sbin/bash`、`/sbin/bas`、`/sbin/getprop` 兼容路径。
+- 修复官方 A/B 包成功前提前切换/准备动态分区的问题。
+- 安装官方包前后校验 LP 元数据容量；仅对安全的单 Super 布局执行扩容并复核写入结果。
+- 刷写 Super 镜像前先解除逻辑分区映射。
+- Format Data 先在独立页面检查 Virtual A/B 快照状态，检查线程结束后再由用户确认格式化，避免黑屏和界面锁死。
+- 删除重复 Sideload USB 状态触发，避免首次进入 Sideload 时 ADB 连接立即关闭。
+- 安装阶段可切换性能策略，结束后恢复默认调度。
 
-### recovery/root/init.recovery.qcom.rc
+### WLAN、显示与振动
 
-- 加载 recovery 环境需要的 vendor kernel modules。
-- 初始化 WiFi、USB、MTP、ADB 相关节点和目录。
-- 修正部分 Android 16 init 不兼容语句，避免 `host_init_verifier` 编译失败。
-- 调整 vendor / odm / firmware 挂载和 service 启动顺序。
+- WLAN 优先从当前槽位的 `system_dlkm`、`vendor_dlkm` 加载匹配模块，并保留 recovery 内置模块作为回退。
+- DHCP 正确配置 IPv4、默认路由、DNS，并生成 `/tmp/recovery/wifi-dhcp.lease`。
+- 修复首次点击异常振动及振动只生效一次的问题。
+- 亮度节点使用 `panel0-backlight`，最大值保持真机验证的 `16383`。
+- 简体中文界面下 Czech、Greek、Ukrainian 使用稳定英文显示名，语言内容不变。
+- 增加 Myron 专属双鱼开屏图标。
 
-### recovery/root/init.recovery.usb.rc
+## 2026-08-04 修复
 
-- 使用 configfs 方式配置 USB gadget。
-- 修复 MTP 与 ADB 不能稳定切换的问题。
-- 支持默认 ADB 在线，启用 MTP 后可传文件，关闭 MTP 后 ADB 能恢复。
-- 使用小米 VID/PID 组合并绑定到设备实际 USB controller。
+- 补齐官方 Myron Global vendor 中的 QTI KeyMint 运行依赖，并恢复 KeyMint、Gatekeeper 的 stock 服务身份。
+- 保持 QTI + NXP 解密服务顺序；Evolution X 17 仅在 fscrypt 策略匹配时进入解密。
+- 解密成功后单次自动启动 MTP；EvoX 下增加短时 USB gadget 状态恢复。
+- U 盘使用结束后恢复 peripheral 模式及原有 ADB/MTP 组合，隐藏空的 USB-OTG 父项并保留真实分区。
+- 修正 CPU 温度节点，EvoX 解密后按 ATS 偏移恢复 recovery 时间。
+- Fastbootd 菜单改用经回读验证的 BCB 请求。
+- Format Data 三态保护：`none` 正常允许；`merging` 禁止绕过；其他快照状态需“类原生／强制格式化”二次确认。
 
-### prebuilt/system/etc/twrp.flags
+## 2026-08-08 修复
 
-- 增加 myron 分区显示、备份、刷写标记。
-- 修复 raw 分区备份项，避免 modem 等 busy 分区导致备份异常。
-- 移除手动 `/super` raw 备份项，避免备份界面出现两个 Super。
-- 保留动态 Super 逻辑，让 TWRP 自动显示 `Super` 备份项。
+- Persist 统一挂载到 `/mnt/vendor/persist`，并以 `/persist` 软链接兼容旧安装器，避免分区刷新和 GApps 安装结束时重复挂载报错。
+- USB-OTG 进入 host 模式前解除 UDC 绑定，退出后恢复原有 ADB/MTP 组合；组合恢复失败时回退到 ADB，避免拔出 U 盘后连接丢失。
+- MTP 守护在 host 模式下暂停，防止 USB gadget 与 U 盘争用控制器。
+- USB-OTG 父项不再作为普通存储显示，保留 U 盘实际分区；界面统一显示为 `USB-OTG`。
+- 通用源码改用标准设备钩子，设备安全服务、解密重试与重启清理由各设备树单独提供。
 
-### WiFi 相关预置文件
-
-- 添加 `iw`、`wpa_cli`、`wpa_supplicant`、WiFi 脚本和 WiFi vendor libraries。
-- 添加 WiFi supplicant VINTF manifest。
-- 添加 wlan/cfg80211/mac80211/qca_cld3 等模块，支持 recovery 内扫描和连接 WiFi。
-- 修复第一次扫描为空、第二次扫描才出现网络的问题。
-
-### sepolicy
-
-- 补充 recovery 下访问 WiFi、USB、firmware、vendor service、sysfs 节点所需权限。
-- 修复 recovery 编译时 CRLF / 非法字符导致的 `checkpolicy` 报错。
-
-## bootable/recovery 源码侧配套改动
-
-这些改动不在设备树目录内，但当前 recovery 镜像依赖它们。
-
-### GUI / 主题
-
-- 调整 myron 挖孔屏状态栏布局，避免时间、CPU 温度、电量被摄像头遮挡。
-- WiFi 页面按钮位置调整，避免底部按钮被导航栏遮挡。
-- 添加 WiFi 状态栏图标。
-- 高级扩展页添加作者信息：
-  - 关注酷安：變換風雲
-  - GitHub：MissMyTime
-  - 基于 Team Win Recovery Project 开源项目
-- 去除 QQ 群信息，减少发布包中的个人群号依赖。
-
-### MTP / ADB
-
-- 调整 USB gadget 切换逻辑，避免启用 MTP 后 ADB 永久掉线。
-- 修复关闭 MTP 后 ADB 无法恢复的问题。
-- 保持 recovery 默认 ADB 可用，MTP 需要时可手动启用。
-
-### 振动
-
-- 修改 `minuitwrp/events.cpp`，适配 myron 实际 haptics input / ff-memless 路径。
-- 修复点击振动无效问题。
-- 避免错误 haptics 节点导致 UI 点击卡顿。
-
-### ZIP / 卡刷
-
-- 修复大体积 `super.img.zst` 通过 `unzip -p` 管道刷入时的输出逻辑。
-- 解决 Android 16 / 6.1+ 内核环境下大 super 文件不能正常从 zip 流式刷入的问题。
-- 官改包刷入时如果最后出现动态分区挂载红字，但上方显示安装成功，通常是刷完后 TWRP 尝试刷新挂载详情失败，不一定代表刷入失败；仍建议配合 recovery.log 判断。
-
-### 备份 / 恢复
-
-- 修复超大 Data 备份分卷数量超过 99 后失败的问题，将分卷上限扩展到 999。
-- 修复备份失败后残留半成品备份目录的问题，失败时自动清理备份文件夹。
-- 关闭 libtar 默认调试日志，避免 recovery.log / dmesg 日志过大。
-- 调整动态 Super 显示名，避免 `Super (system system_ext product vendor)` 过长遮挡容量。
-
-### APEX / 解密
-
-- 调整 APEX 相关处理，避免解密流程中缺少 apex 或挂载顺序异常导致 FBE 解密卡住。
-- 保持 Android 16 FBE metadata decrypt 所需环境。
-
-## 构建说明
-
-在 `/root/twrp16` 下执行：
+## 构建
 
 ```bash
+cd /root/twrp16
+
+git clone --depth=1 -b main \
+    https://github.com/MissMyTime/TWRP-Xiaomi.git /tmp/twrp-common
+rsync -a /tmp/twrp-common/source_changes/files/ ./
+
+git clone --depth=1 -b myron \
+    https://github.com/MissMyTime/TWRP-Xiaomi.git /tmp/twrp-myron
+mkdir -p device/xiaomi/myron
+rsync -a /tmp/twrp-myron/device/xiaomi/myron/ device/xiaomi/myron/
+
 source build/envsetup.sh
 lunch twrp_myron-bp2a-eng
-mka recoveryimage -j$(nproc)
+m recoveryimage
 ```
 
 输出文件：
@@ -121,15 +83,21 @@ mka recoveryimage -j$(nproc)
 out/target/product/myron/recovery.img
 ```
 
-## 发布注意事项
+也可以在 `myron` 分支的 Actions 页面手动运行构建工作流。
 
-- 普通真解锁 BL 用户：推荐使用本 recovery。
-- 假回锁 BL 用户：必须确认所用 ABL/GBL 信任链允许第三方 recovery，或使用对应签名链重新签名 recovery。仅修改 TWRP 设备树无法绕过强 AVB 校验。
-- 刷入命令应使用：
+## 刷入
 
 ```bash
-fastboot flash recovery recovery.img
+adb reboot bootloader
+fastboot getvar current-slot
+fastboot --slot=b flash recovery recovery.img
 fastboot reboot recovery
 ```
 
-不要使用 `fastboot flash recovery_ab recovery.img`，myron 当前是独立 recovery 分区。
+当前槽位为 `b` 时，把 `--slot=b` 改为 `--slot=a`。本镜像为 ramdisk-only recovery，不支持 `fastboot boot recovery.img`。
+
+## 维护边界
+
+- Myron 的安全服务、解密与 USB 脚本仅保留在本设备树，不与其他设备共用。
+- Format Data 的 Virtual A/B 检查必须保持为独立 GUI 阶段，不能在 recovery 主线程中无限等待 BootControl 服务。
+- 更新固件安全补丁级别后，应重新验证 KeyMint、Weaver、WLAN 模块和 FBE 解密。

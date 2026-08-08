@@ -88,7 +88,17 @@ TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
 BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOT_HEADER_VERSION)
 BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
 
+# Verified 2026-06-15 release-image configuration: header and build props use
+# the platform 99.87.36 / 2099-12-31 values, same as the June baseline.
+BOARD_RECOVERY_MKBOOTIMG_ARGS := $(BOARD_MKBOOTIMG_ARGS)
+BOARD_RECOVERY_MKBOOTIMG_ARGS += --os_version 99.87.36
+BOARD_RECOVERY_MKBOOTIMG_ARGS += --os_patch_level 2099-12-31
+BOARD_RECOVERY_BUILD_PROP_VERSION_RELEASE := 99.87.36
+BOARD_RECOVERY_BUILD_PROP_SECURITY_PATCH := 2099-12-31
+VENDOR_SECURITY_PATCH := 2099-12-31
+
 BOARD_EXCLUDE_KERNEL_FROM_RECOVERY_IMAGE := true
+TARGET_RECOVERY_ODM_PREBUILT_DIR := $(DEVICE_PATH)/prebuilt/odm
 BOARD_RAMDISK_USE_LZ4 := true
 BOARD_USES_RECOVERY_AS_BOOT := false
 
@@ -105,20 +115,67 @@ BOARD_KERNEL_CMDLINE :=
 #   dedicated recovery_a / recovery_b raw partitions exist
 # -----------------------------------------------------------------------------
 AB_OTA_UPDATER := true
+# Matches the official OS3.0.306.4.WPMCNXM full-OTA payload manifest exactly
+# (58 partitions, verified against payload.bin of the official package).
 AB_OTA_PARTITIONS += \
+    abl \
+    aop \
+    aop_config \
+    bluetooth \
     boot \
-    init_boot \
-    vendor_boot \
+    countrycode \
+    cpucp \
+    cpucp_dtb \
+    dcp \
+    devcfg \
+    dsp \
     dtbo \
+    featenabler \
+    hyp \
+    hyp_ac_config \
+    idmanager \
+    imagefv \
+    init_boot \
+    keymaster \
+    mi_ext \
+    modem \
+    modemfirmware \
+    multiimgqti \
+    odm \
+    pdp \
+    pdp_cdb \
+    product \
+    pvmfw \
+    qtvm_dtbo \
+    qupfw \
+    recovery \
+    secretkeeper \
+    shrm \
+    soccp \
+    soccp_dcd \
+    soccp_debug \
+    spuservice \
+    system \
+    system_dlkm \
+    system_ext \
+    tme_config \
+    tme_fw \
+    tme_seq_patch \
+    tz \
+    tz_ac_config \
+    tz_qti_config \
+    uefi \
+    uefisecapp \
     vbmeta \
     vbmeta_system \
-    system \
-    system_ext \
-    system_dlkm \
-    product \
     vendor \
+    vendor_boot \
     vendor_dlkm \
-    odm
+    vm-bootsys \
+    xbl \
+    xbl_ac_config \
+    xbl_config \
+    xbl_ramdump
 
 BOARD_RECOVERY_NEEDS_BOOTLOADER_CONTROL := true
 
@@ -131,6 +188,8 @@ BOARD_RECOVERY_NEEDS_BOOTLOADER_CONTROL := true
 #   ro.boot.veritymode=enforcing
 # -----------------------------------------------------------------------------
 BOARD_AVB_ENABLE := true
+# No --rollback_index override: the verified 2026-06-15 image ships index 0,
+# and flashing a higher index can permanently block returning to that image.
 
 # -----------------------------------------------------------------------------
 # 6. Physical partition sizes
@@ -228,16 +287,7 @@ TW_USE_FSCRYPT_POLICY := 2
 TW_CRYPTO_USE_VENDOR_KEYMINT := true
 
 # -----------------------------------------------------------------------------
-# 10. Recovery-side security patch compatibility
-# -----------------------------------------------------------------------------
-PLATFORM_VERSION := 99.87.36
-PLATFORM_VERSION_LAST_STABLE := $(PLATFORM_VERSION)
-PLATFORM_SECURITY_PATCH := 2099-12-31
-VENDOR_SECURITY_PATCH := $(PLATFORM_SECURITY_PATCH)
-BOOT_SECURITY_PATCH := $(PLATFORM_SECURITY_PATCH)
-
-# -----------------------------------------------------------------------------
-# 11. Recovery base
+# 10. Recovery base
 # APEX is loaded and working on AOSP 16 TWRP (twrp.apex.loaded=true).
 # additional.fstab is used for metadata-encrypted userdata decrypt passthrough.
 # -----------------------------------------------------------------------------
@@ -324,7 +374,7 @@ TW_USE_BATTERY_SYSFS_STATS := true
 TW_BATTERY_SYSFS_WAIT_SECONDS := 8
 
 TW_USE_LEGACY_BATTERY_SERVICES := true
-TW_CUSTOM_CPU_TEMP_PATH := "/sys/class/thermal/thermal_zone75/temp"
+TW_CUSTOM_CPU_TEMP_PATH := "/sys/class/thermal/thermal_zone68/temp"
 
 # -----------------------------------------------------------------------------
 # 16. Vendor modules
@@ -372,3 +422,5 @@ TWRP_INCLUDE_LOGCAT := true
 TARGET_RECOVERY_DEVICE_MODULES += debuggerd strace
 RECOVERY_BINARY_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/debuggerd
 RECOVERY_BINARY_SOURCE_FILES += $(TARGET_OUT_EXECUTABLES)/strace
+
+include vendor/twrp/config/BoardConfigTWRP.mk

@@ -1,4 +1,4 @@
-# recovery.fstab — Redmi K90 Pro Max / myron
+# recovery.fstab - Redmi K90 Pro Max / myron
 # Source: verified fstab.qcom + lpdump + by-name links
 # Android 16 / SM8850 / Virtual A/B / Dynamic Partitions / FBE v2
 
@@ -29,8 +29,9 @@
 /misc            emmc     /dev/block/bootdevice/by-name/misc          flags=display="Misc";backup=1;flashimg=1
 
 # Critical firmware / calibration partitions
-# Backup allowed where useful; no wipe flags.
-/persist         ext4     /dev/block/bootdevice/by-name/persist       flags=display="Persist";backup=1
+# Persist is mounted at the vendor path required by QSEE. /persist remains a
+# compatibility symlink in the recovery ramdisk.
+/mnt/vendor/persist ext4  /dev/block/bootdevice/by-name/persist       flags=display="Persist";backup=1
 /modem           emmc     /dev/block/bootdevice/by-name/modem         flags=display="Modem";backup=1;flashimg=1;slotselect
 /modemfirmware   emmc     /dev/block/bootdevice/by-name/modemfirmware flags=display="Modem_Firmware";backup=1;flashimg=1;slotselect
 /dsp             emmc     /dev/block/bootdevice/by-name/dsp           flags=display="DSP";backup=1;flashimg=1;slotselect
@@ -43,4 +44,4 @@
 /logfs           emmc     /dev/block/bootdevice/by-name/logfs         flags=display="Logfs";backup=1;flashimg=1
 
 # Removable storage
-/usb_otg         auto     /devices/platform/soc/a600000.ssusb/*.dwc3/xhci-hcd.*.auto* flags=display="USB-OTG";storage;wipeingui;removable;voldmanaged=usbotg:auto
+/usb_otg         auto     /devices/platform/soc/a600000.ssusb/*.dwc3/xhci-hcd.*.auto* flags=display="USB-OTG";wipeingui;removable;voldmanaged=usbotg:auto;storage=0

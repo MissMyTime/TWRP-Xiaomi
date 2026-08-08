@@ -43,12 +43,12 @@ on fs
     chmod 0664 /dev/ion
     chown system system /dev/ion
 
-    # Mount persist for KeyMint / QSEE credentials
+    # Mount persist once at the canonical vendor path required by QSEE.
+    # The recovery ramdisk exposes /persist as a compatibility symlink.
     mkdir /mnt/vendor 0775 shell system
     mkdir /mnt/vendor/persist 0775 shell system
     wait /dev/block/bootdevice/by-name/persist
-    mount ext4 /dev/block/bootdevice/by-name/persist /persist noatime nosuid nodev barrier=1
-    mount none /persist /mnt/vendor/persist bind
+    mount ext4 /dev/block/bootdevice/by-name/persist /mnt/vendor/persist noatime nosuid nodev barrier=1
 
     # Mount firmware for QSEE TA images
     mkdir /vendor/firmware_mnt 0755 root root
@@ -62,9 +62,14 @@ on fs
     setprop vendor.gatekeeper.is_security_level_spu 0
 
 on boot
+    # Keep idle recovery thermals under control; intensive operations request
+    # performance mode through recovery.perf.mode.
+    setprop recovery.perf.mode 0
+
     # ADB over USB
     setprop sys.usb.config adb
     setprop sys.usb.configfs 1
+    start myron-usb-role-recover
 
     chmod 0755 /sbin/iw
     chmod 0755 /sbin/wifi-dhcp.sh
@@ -75,11 +80,25 @@ on boot
 on property:ro.boot.usbcontroller=*
     setprop sys.usb.controller ${ro.boot.usbcontroller}
 
+on property:recovery.perf.mode=0
+    write /sys/devices/system/cpu/cpufreq/policy0/scaling_governor schedutil
+    write /sys/devices/system/cpu/cpufreq/policy6/scaling_governor schedutil
+
+on property:recovery.perf.mode=1
+    write /sys/devices/system/cpu/cpufreq/policy0/scaling_governor performance
+    write /sys/devices/system/cpu/cpufreq/policy6/scaling_governor performance
+
 # -----------------------------------------------------------------------------
 # Post-module-load setup
 # TWRP sets twrp.modules.loaded=true after loading kernel modules.
 # -----------------------------------------------------------------------------
 on property:twrp.modules.loaded=true
+    # TWRP briefly mounts persist while probing partitions, then unmounts it.
+    # QSEECom starts later and requires the canonical vendor mount point.
+    mkdir /mnt/vendor 0775 shell system
+    mkdir /mnt/vendor/persist 0775 shell system
+    mount ext4 /dev/block/bootdevice/by-name/persist /mnt/vendor/persist noatime nosuid nodev barrier=1
+
     # Mount modem firmware (slot-aware)
     mount vfat /dev/block/bootdevice/by-name/modem${ro.boot.slot_suffix} /vendor/firmware_mnt ro
     mount none /vendor/firmware_mnt /firmware bind
@@ -136,6 +155,14 @@ on property:servicemanager.ready=true
 on property:sys.boot_completed=1
     start myron-nxp-gate
 
+# The helpers verify the Evolution X Android 17 fingerprint in /proc/cmdline
+# and exit immediately on the stock HyperOS recovery path.
+on property:twrp.all.users.decrypted=true
+    start myron-evox-time-fix
+
+on property:sys.usb.config=twrp_mtp_adb
+    start myron-evox-mtp-keeper
+
 # -----------------------------------------------------------------------------
 # myron-specific services
 # -----------------------------------------------------------------------------
@@ -156,4 +183,27 @@ service myron-nxp-gate /system/bin/myron-nxp-gate.sh
     oneshot
     user root
     group root shell
+    seclabel u:r:recovery:s0
+
+service myron-evox-time-fix /system/bin/myron-evox-time-fix.sh
+    disabled
+    oneshot
+    user root
+    group root system
+    seclabel u:r:recovery:s0
+
+service myron-evox-mtp-keeper /system/bin/myron-evox-mtp-keeper.sh
+    disabled
+    oneshot
+    user root
+    group root system shell
+    seclabel u:r:recovery:s0
+
+# Preserve USB host mode while removable storage is connected, then restore
+# the recovery gadget after the cable returns to device mode.
+service myron-usb-role-recover /system/bin/myron-usb-role-recover.sh
+    class main
+    disabled
+    user root
+    group root shell system usb
     seclabel u:r:recovery:s0
