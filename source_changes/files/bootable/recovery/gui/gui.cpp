@@ -312,6 +312,26 @@ void InputHandler::process_EV_KEY(input_event& ev)
 {
 	HardwareKeyboard *kb = PageManager::GetHardwareKeyboard();
 
+	if (ev.value == 1 && (ev.code == KEY_VOLUMEUP || ev.code == KEY_VOLUMEDOWN) &&
+			access("/tmp/twrp-ak3-volkey-arm", F_OK) == 0) {
+		const char* key = ev.code == KEY_VOLUMEUP ? "KEY_VOLUMEUP\n" : "KEY_VOLUMEDOWN\n";
+		const char* pending = "/tmp/twrp-ak3-volkey.pending";
+		int fd = open(pending, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+		if (fd >= 0) {
+			ssize_t key_len = strlen(key);
+			if (write(fd, key, key_len) == key_len) {
+				close(fd);
+				if (rename(pending, "/tmp/twrp-ak3-volkey") == 0)
+					LOGINFO("TWRP_AK3_VOLKEY=%s", key);
+				else
+					unlink(pending);
+			} else {
+				close(fd);
+				unlink(pending);
+			}
+		}
+	}
+
 	// Handle key-press here
 	LOGEVENT("TOUCH_KEY: %d\n", ev.code);
 	// Left mouse button is treated as a touch
@@ -793,6 +813,13 @@ extern "C" int gui_init(void)
 
 extern "C" int gui_loadResources(void)
 {
+#ifdef TW_FORCE_STOCK_THEME_ON_BOOT
+	if (PageManager::LoadPackage("TWRP", TWRES "ui.xml", "main"))
+	{
+		gui_err("base_pkg_err=Failed to load base packages.");
+		goto error;
+	}
+#else
 #ifndef TW_OEM_BUILD
 	int check = 0;
 	DataManager::GetValue(TW_IS_ENCRYPTED, check);
@@ -846,6 +873,7 @@ extern "C" int gui_loadResources(void)
 		}
 	}
 #endif // ifndef TW_OEM_BUILD
+#endif // ifdef TW_FORCE_STOCK_THEME_ON_BOOT
 	// Set the default package
 	PageManager::SelectPackage("TWRP");
 

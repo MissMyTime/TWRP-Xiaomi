@@ -29,7 +29,7 @@
 		<string name="sdext">SD-EXT</string>
 		<string name="adopted_data">Adopted Data</string>
 		<string name="adopted_storage">Adopted Storage</string>
-		<string name="autostorage">Storage</string>
+		<string name="autostorage">USB-OTG</string>
 		<!-- GUI XML strings -->
 		<string name="twrp_header">Team Win Recovery Project</string>
 		<string name="twrp_watch_header">TWRP %tw_version%</string>
@@ -512,7 +512,7 @@
 		<string name="decrypt_users_selection">Select a user ID to decrypt</string>
 		<string name="select_user">Select User</string>
 		<string name="backup_storage_undecrypt_warning">Backup will not include some files of user {1}, because the user is not decrypted.</string>
-		<string name="nezha_goodix_wait">Waiting for Goodix Weaver before checking password...</string>
+		<string name="recovery_hook_wait">Waiting for the device security service...</string>
 		<string name="decrypting_user_fbe">Attempting to decrypt FBE for user {1}...</string>
 		<string name="decrypt_user_success_fbe">User {1} Decrypted Successfully</string>
 		<string name="decrypt_user_fail_fbe">Failed to decrypt user {1}</string>
@@ -798,5 +798,18 @@
 		<string name="wlan_start_service_btn">Start Service</string>
 		<string name="select_wlan_hdr">Select WLAN to Connect</string>
 		<string name="next_btn">Next</string>
+		<string name="format_data_vab_blocked_hdr">Format Data Blocked</string>
+		<string name="format_data_vab_blocked_1">Virtual A/B snapshot state detected.</string>
+		<string name="format_data_vab_blocked_2">Boot the newly installed system first.</string>
+		<string name="format_data_vab_blocked_3">Format Data was cancelled to protect the ROM.</string>
+		<string name="format_data_vab_force_btn">Custom ROM / Force Format</string>
+		<string name="format_data_vab_force_hdr">Force Format Data</string>
+		<string name="format_data_vab_force_1">Use this only after installing a custom ROM.</string>
+		<string name="format_data_vab_force_2">Do not continue while an OTA snapshot is merging.</string>
+		<string name="format_data_vab_force_3">A pending system update may be damaged.</string>
+		<string name="format_data_vab_force_confirm">I Understand the Risk</string>
+		<string name="format_data_vab_merging_hdr">Format Data Still Blocked</string>
+		<string name="format_data_vab_merging_1">Virtual A/B snapshot merge is in progress.</string>
+		<string name="format_data_vab_merging_2">Wait for the merge to finish before formatting.</string>
 	</resources>
 </language>

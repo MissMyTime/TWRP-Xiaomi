@@ -18,6 +18,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -26,6 +27,7 @@
 #include <signal.h>
 #include <thread>
 #include <chrono>
+#include <android-base/properties.h>
 #include "recovery_utils/battery_utils.h"
 #include "gui/twmsg.h"
 
@@ -81,7 +83,47 @@ static void Print_Prop(const char *key, const char *name, void *cookie) {
 	printf("%s=%s\n", key, name);
 }
 
+static void Wait_For_Configured_Touch_Service() {
+	char service[PROPERTY_VALUE_MAX] = {};
+	property_get("twrp.recovery.touch_service", service, "");
+	if (service[0] == '\0')
+		return;
+
+	const std::string state_property = "init.svc." + std::string(service);
+	LOGINFO("Waiting up to 5 seconds for touch service '%s'\n", service);
+	for (int retry = 0; retry < 250; ++retry) {
+		char state[PROPERTY_VALUE_MAX] = {};
+		property_get(state_property.c_str(), state, "");
+		if (strcmp(state, "running") == 0) {
+			// Do not query the vendor Binder service from the splash thread.
+			// AServiceManager_checkService can block indefinitely while the
+			// vendor service manager is still settling, defeating this timeout.
+			usleep(300000);
+			LOGINFO("Touch service is running; controller settled\n");
+			return;
+		}
+		usleep(20000);
+	}
+	LOGINFO("Touch service timed out after 5 seconds; continuing startup\n");
+}
+
 static void Decrypt_Page(bool SkipDecryption, bool datamedia) {
+	const bool prepare_fbe = android::base::GetBoolProperty(
+		"twrp.recovery.prepare_fbe", false);
+	if (prepare_fbe) {
+		// Some metadata-encrypted devices leave the generic TWRP encryption flags
+		// unset until the first manual decrypt action.
+		char fbe_contents[PROPERTY_VALUE_MAX] = {};
+		property_get("fbe.contents", fbe_contents, "");
+		if (fbe_contents[0] != '\0') {
+			if (!DataManager::GetIntValue(TW_IS_FBE))
+				LOGINFO("FBE properties detected before encrypted-state gate\n");
+			DataManager::SetValue(TW_IS_FBE, 1);
+			DataManager::SetValue(TW_IS_ENCRYPTED, 1);
+			DataManager::SetValue("tw_crypto_user_id", "0");
+		}
+	}
+
 	// Offer to decrypt if the device is encrypted
 	if (DataManager::GetIntValue(TW_IS_ENCRYPTED) != 0) {
 #ifdef TW_NO_AUTO_DECRYPT
@@ -91,12 +133,23 @@ static void Decrypt_Page(bool SkipDecryption, bool datamedia) {
 		if (SkipDecryption) {
 			LOGINFO("Skipping decryption\n");
 			PartitionManager.Update_System_Details();
-		} else if (DataManager::GetIntValue(TW_CRYPTO_PWTYPE) != 0) {
+		} else {
+			// Opt-in metadata preparation exposes the synthetic-password files
+			// before selecting the first credential page.
+			if (prepare_fbe && DataManager::GetIntValue(TW_IS_FBE) &&
+			    DataManager::GetIntValue(TW_CRYPTO_PWTYPE) == 0) {
+				LOGINFO("Preparing metadata/FBE before initial credential page\n");
+				PartitionManager.Decrypt_Data();
+			}
+
+			if (DataManager::GetIntValue(TW_IS_ENCRYPTED) != 0 &&
+			    DataManager::GetIntValue(TW_CRYPTO_PWTYPE) != 0) {
 			LOGINFO("Is encrypted, do decrypt page first\n");
 			if (DataManager::GetIntValue(TW_IS_FBE))
 				DataManager::SetValue("tw_crypto_user_id", "0");
 			if (gui_startPage("decrypt", 1, 1) != 0) {
 				LOGERR("Failed to start decrypt GUI page.\n");
+			}
 			}
 		}
 #endif
@@ -327,9 +380,21 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
 
 static void reboot() {
 	gui_msg(Msg("rebooting=Rebooting..."));
-	TWFunc::Update_Log_File();
 	string Reboot_Arg;
 	DataManager::GetValue("tw_reboot_arg", Reboot_Arg);
+	if (android::base::GetBoolProperty(
+			"twrp.recovery.direct_system_reboot", false) &&
+			(Reboot_Arg.empty() || Reboot_Arg == "system")) {
+		LOGINFO("Direct system reboot: bypassing recovery filesystem cleanup\n");
+		property_set("sys.powerctl", "reboot,");
+#ifdef ANDROID_RB_RESTART
+		android_reboot(ANDROID_RB_RESTART, 0, 0);
+#else
+		::reboot(RB_AUTOBOOT);
+#endif
+		return;
+	}
+	TWFunc::Update_Log_File();
 	if (Reboot_Arg == "recovery")
 		TWFunc::tw_reboot(rb_recovery);
 	else if (Reboot_Arg == "poweroff")
@@ -420,8 +485,13 @@ int main(int argc, char **argv) {
 
 	printf("Starting the UI...\n");
 	gui_init();
+	Wait_For_Configured_Touch_Service();
 
+#ifndef TW_SKIP_POST_GUI_FSTAB_SETUP
 	if (!startup.Get_Fastboot_Mode()) PartitionManager.Setup_Fstab_Partitions(true);
+#else
+	LOGINFO("TW_SKIP_POST_GUI_FSTAB_SETUP := true; skipping post-GUI fstab setup.\n");
+#endif
 
 	// Load up all the resources
 	gui_loadResources();

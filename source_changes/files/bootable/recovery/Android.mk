@@ -139,6 +139,14 @@ ifeq ($(TW_OEM_BUILD),true)
     TW_EXCLUDE_ZIP := true
 endif
 
+ifeq ($(TW_FORCE_STOCK_THEME_ON_BOOT),true)
+    LOCAL_CFLAGS += -DTW_FORCE_STOCK_THEME_ON_BOOT
+endif
+
+ifeq ($(TW_SKIP_POST_GUI_FSTAB_SETUP),true)
+    LOCAL_CFLAGS += -DTW_SKIP_POST_GUI_FSTAB_SETUP
+endif
+
 ifeq ($(AB_OTA_UPDATER),true)
     LOCAL_CFLAGS += -DAB_OTA_UPDATER=1
     TWRP_REQUIRED_MODULES += libhardware android.hardware.boot@1.0-service android.hardware.boot@1.0-service.rc \
@@ -200,8 +208,10 @@ endif
 LOCAL_C_INCLUDES += system/extras/ext4_utils
 
 tw_git_revision := $(shell git -C $(LOCAL_PATH) rev-parse --short=8 HEAD 2>/dev/null)
-ifeq ($(shell git -C $(LOCAL_PATH) diff --quiet; echo $$?),1)
-    tw_git_revision := $(tw_git_revision)-dirty
+ifneq ($(tw_git_revision),)
+    ifeq ($(shell git -C $(LOCAL_PATH) diff --quiet; echo $$?),1)
+        tw_git_revision := $(tw_git_revision)-dirty
+    endif
 endif
 LOCAL_CFLAGS += -DTW_GIT_REVISION='"$(tw_git_revision)"'
 
@@ -702,35 +712,6 @@ LOCAL_POST_INSTALL_CMD := \
 
 
 include $(BUILD_PHONY_PACKAGE)
-
-# recovery-persist (system partition dynamic executable run after /data mounts)
-# ===============================
-include $(CLEAR_VARS)
-LOCAL_SRC_FILES := \
-    recovery-persist.cpp 
-LOCAL_MODULE := recovery-persist
-LOCAL_SHARED_LIBRARIES := liblog libbase 
-LOCAL_STATIC_LIBRARIES := libotautil librecovery_utils
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/otautil/include
-LOCAL_C_INCLUDES += system/core/libstats/include
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/recovery_utils/include
-LOCAL_CFLAGS := -Werror
-LOCAL_INIT_RC := recovery-persist.rc
-include $(BUILD_EXECUTABLE)
-
-# recovery-refresh (system partition dynamic executable run at init)
-# ===============================
-include $(CLEAR_VARS)
-LOCAL_SRC_FILES := \
-    recovery-refresh.cpp
-LOCAL_MODULE := recovery-refresh
-LOCAL_SHARED_LIBRARIES := liblog libbase
-LOCAL_STATIC_LIBRARIES := libotautil librecovery_utils
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/otautil/include
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/recovery_utils/include
-LOCAL_CFLAGS := -Werror
-LOCAL_INIT_RC := recovery-refresh.rc
-include $(BUILD_EXECUTABLE)
 
 # libmounts (static library)
 # ===============================

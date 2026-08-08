@@ -619,6 +619,13 @@ void TWFunc::Update_Intent_File(string Intent) {
 // reboot: Reboot the system. Return -1 on error, no return on success
 int TWFunc::tw_reboot(RebootCommand command)
 {
+#ifndef TW_EXCLUDE_MTP
+	if (DataManager::GetIntValue("tw_mtp_enabled")) {
+		LOGINFO("Reboot: stopping MTP before final filesystem sync\n");
+		PartitionManager.Disable_MTP();
+	}
+#endif
+
 	DataManager::Flush();
 	Update_Log_File();
 
@@ -632,7 +639,7 @@ int TWFunc::tw_reboot(RebootCommand command)
 		}
 	}
 
-	check_and_run_script("/system/bin/nezha-reboot-cleanup.sh", "nezha reboot cleanup");
+	check_and_run_script("/system/bin/twrp-reboot-cleanup.sh", "device reboot cleanup");
 
 // Clear BCB before any reboot to prevent bootloop back to recovery
 	Clear_Bootloader_Message();
@@ -675,8 +682,19 @@ int TWFunc::tw_reboot(RebootCommand command)
 			check_and_run_script("/system/bin/rebootedl.sh", "reboot edl");
 			return property_set(ANDROID_RB_PROPERTY, "reboot,edl");
 		case rb_fastboot:
-			Clear_Bootloader_Message();
-			return property_set(ANDROID_RB_PROPERTY, "reboot,bootloader");
+		{
+			bootloader_message boot = {};
+			strlcpy(boot.command, "boot-fastboot", sizeof(boot.command));
+			std::string err;
+			if (!write_bootloader_message(boot, &err)) {
+				LOGERR("Fastbootd: failed to write boot-fastboot BCB command: %s\n",
+					err.c_str());
+				return -1;
+			}
+			LOGINFO("Fastbootd: wrote boot-fastboot BCB command; rebooting recovery\n");
+			sync();
+			return property_set(ANDROID_RB_PROPERTY, "reboot,recovery");
+		}
 		default:
 			return -1;
 	}
@@ -1477,9 +1495,11 @@ string TWFunc::Check_For_TwrpFolder() {
 		LOGINFO("No recovery folder found. Using default folder.\n");
 		if (android::base::GetProperty(TW_FASTBOOT_MODE_PROP, "0") != "1") {
 			TWPartition* SDCard = PartitionManager.Find_Partition_By_Path(DataManager::GetCurrentStoragePath());
-			if (SDCard->Mount(true)) {
+			if (SDCard != nullptr && SDCard->Mount(true)) {
 				mainPath += TW_DEFAULT_RECOVERY_FOLDER;
 				mkdir(mainPath.c_str(), 0777);
+			} else if (SDCard == nullptr) {
+				LOGINFO("No current storage partition is available; skipping recovery folder creation.\n");
 			}
 		}
 		goto exit;
@@ -1637,6 +1657,21 @@ bool TWFunc::Get_Service_From_Manifest(std::string basepath, std::string service
 	Exec_Cmd("find " + manifestpath + "manifest/ -type f -name *" + service + "*", filename, false);
 	if (filename.empty()) {
 		LOGINFO("Separate manifest doesn't exist for '%s'\n", service.c_str());
+		/*
+		 * Some vendor AIDL HAL manifests do not include the exact HAL name in
+		 * the file name. OneKeyMint is a common example:
+		 *   android.hardware.security.onekeymint-service-qti.xml
+		 * declares:
+		 *   <name>android.hardware.security.keymint</name>
+		 *
+		 * The old filename-only lookup misses those manifests and leaves
+		 * keymaster_ver empty, which breaks FBE credential checks on AIDL-only
+		 * devices.
+		 */
+		Exec_Cmd("grep -Rsl '<name>" + service + "</name>' " + manifestpath + "manifest/ " + manifestpath + "manifest.xml 2>/dev/null | head -n 1", filename, false);
+		filename = android::base::Trim(filename);
+	}
+	if (filename.empty()) {
 		// Look for manifest_PLATFORM.xml
 		filename = manifestpath + "manifest_" + platform + ".xml";
 		if (!Path_Exists(filename)) {

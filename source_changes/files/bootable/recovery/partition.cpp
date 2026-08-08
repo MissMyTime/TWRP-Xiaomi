@@ -728,6 +728,15 @@ void TWPartition::Setup_Data_Partition(bool Display_Error) {
 //			} else {
 				Is_Encrypted = true;
 				Is_Decrypted = false;
+				if (!Key_Directory.empty()) {
+					Is_FBE = true;
+					DataManager::SetValue(TW_IS_FBE, 1);
+					DataManager::SetValue(TW_IS_ENCRYPTED, 1);
+					PartitionManager.Set_Crypto_State();
+					PartitionManager.Set_Crypto_Type("file");
+					LOGINFO("Mount failed, but /data has FBE key directory '%s'; keeping FBE decrypt path enabled\n",
+						Key_Directory.c_str());
+				}
 				if (datamedia)
 					Setup_Data_Media();
 //			}
@@ -813,11 +822,12 @@ bool TWPartition::Decrypt_FBE_DE() {
 		Is_Decrypted = false;
 		DataManager::SetValue(TW_IS_ENCRYPTED, 1);
 		string filename;
-		int pwd_type = android::keystore::Get_Password_Type(0, filename);
-		if (pwd_type < 0) {
-			LOGERR("This TWRP does not have synthetic password decrypt support\n");
-			pwd_type = 0;  // default password
-		}
+			int pwd_type = android::keystore::Get_Password_Type(0, filename);
+			LOGINFO("FBE credential type for user 0: %i, key file hint: '%s'\n", pwd_type, filename.c_str());
+			if (pwd_type < 0) {
+				LOGERR("This TWRP does not have synthetic password decrypt support\n");
+				pwd_type = 0;  // default password
+			}
 		PartitionManager.Parse_Users();  // after load_all_de_keys() to parse_users
 		std::vector<users_struct>::iterator iter;
 		std::vector<users_struct>* userList = PartitionManager.Get_Users_List();
@@ -1592,6 +1602,24 @@ bool TWPartition::Mount(bool Display_Error) {
 	int exfat_mounted = 0;
 	unsigned int flags = Mount_Flags;
 
+	// Metadata-encrypted /data cannot be mounted from its raw block device.
+	// Keep expected pre-decrypt probes in the log without presenting them as
+	// user-facing failures. Real failures after decryption remain visible.
+	const bool metadata_encrypted_data =
+		Mount_Point == "/data" &&
+		(!Key_Directory.empty() ||
+		 !android::base::GetProperty("metadata.contents", "").empty() ||
+		 android::base::GetBoolProperty("ro.crypto.metadata.enabled", false));
+	if (Display_Error && metadata_encrypted_data &&
+	    !android::base::GetBoolProperty("twrp.decrypt.done", false)) {
+		static bool logged_predecrypt_data_probe = false;
+		Display_Error = false;
+		if (!logged_predecrypt_data_probe) {
+			LOGINFO("Suppressing expected /data mount error before metadata/FBE decryption\n");
+			logged_predecrypt_data_probe = true;
+		}
+	}
+
 	if (Is_Mounted()) {
 		return true;
 	} else if (!Can_Be_Mounted) {
@@ -1732,9 +1760,16 @@ bool TWPartition::Mount(bool Display_Error) {
 
 bool TWPartition::Bind_Mount(bool Display_Error) {
 	if (TWFunc::Path_Exists(Symlink_Path)) {
-		if (mount(Symlink_Path.c_str(), Symlink_Mount_Point.c_str(), "", MS_BIND, NULL) < 0) {
+		int ret = mount(Symlink_Path.c_str(), Symlink_Mount_Point.c_str(), "", MS_BIND, NULL);
+		if (ret < 0) {
+			int err = errno;
+			LOGERR("Bind_Mount failed: %s -> %s, errno=%d (%s)\n",
+				Symlink_Path.c_str(), Symlink_Mount_Point.c_str(), err, strerror(err));
 			return false;
 		}
+	} else {
+		LOGERR("Bind_Mount: Symlink_Path does not exist: %s\n", Symlink_Path.c_str());
+		return false;
 	}
 	return true;
 }
@@ -1770,8 +1805,35 @@ void TWPartition::Ensure_Subdirectory_Unmounted(const char* Mount_Point) {
 
 	for (const auto& mount_point : umount_points) {
 		LOGINFO("Unmounting sub-directory mount '%s'\n", mount_point.c_str());
-		if (umount(mount_point.c_str()) != 0) {
-			LOGINFO("Failed to unmount '%s': '%s'\n", mount_point.c_str(), strerror(errno));
+		// Try normal umount first
+		if (umount2(mount_point.c_str(), 0) != 0) {
+			if (errno == EINVAL) {
+				LOGINFO("Sub-mount '%s' already unmounted or invalid (EINVAL)\n", mount_point.c_str());
+				continue;
+			}
+			LOGINFO("Normal umount failed for '%s': '%s', trying MNT_DETACH...\n", mount_point.c_str(), strerror(errno));
+			// Try lazy unmount (MNT_DETACH) - kernel will clean up when no longer busy
+			if (umount2(mount_point.c_str(), MNT_DETACH) != 0) {
+				if (errno == EINVAL) {
+					LOGINFO("Sub-mount '%s' already unmounted or invalid (EINVAL) on MNT_DETACH\n", mount_point.c_str());
+					continue;
+				}
+				LOGINFO("MNT_DETACH umount failed for '%s': '%s', trying MNT_FORCE...\n", mount_point.c_str(), strerror(errno));
+				// Last resort: force unmount
+				if (umount2(mount_point.c_str(), MNT_FORCE) != 0) {
+					if (errno == EINVAL) {
+						LOGINFO("Sub-mount '%s' already unmounted or invalid (EINVAL) on MNT_FORCE\n", mount_point.c_str());
+						continue;
+					}
+					LOGINFO("Failed to unmount '%s': '%s'\n", mount_point.c_str(), strerror(errno));
+				} else {
+					LOGINFO("Force unmounted '%s'\n", mount_point.c_str());
+				}
+			} else {
+				LOGINFO("Lazy unmounted '%s' (MNT_DETACH)\n", mount_point.c_str());
+			}
+		} else {
+			LOGINFO("Unmounted '%s'\n", mount_point.c_str());
 		}
 	}
 }
@@ -1842,6 +1904,13 @@ bool TWPartition::BlkDiscard() {
 bool TWPartition::Wipe(string New_File_System) {
 	bool wiped = false, update_crypt = false, recreate_media = true;
 	int check;
+
+	// Xiaomi fstab uses "mifs" as a userspace alias for an F2FS userdata
+	// volume. mkfs tools do not understand that alias, so format it as F2FS.
+	if (New_File_System == "mifs") {
+		LOGINFO("Mapping mifs format request for %s to f2fs\n", Mount_Point.c_str());
+		New_File_System = "f2fs";
+	}
 
 	if (!Can_Be_Wiped) {
 		gui_msg(Msg(msg::kError, "cannot_wipe=Partition {1} cannot be wiped.")(Display_Name));
@@ -2232,7 +2301,9 @@ bool TWPartition::Wipe_Encryption() {
 		gui_msg("format_data_msg=You may need to reboot recovery to be able to use /data again.");
 #endif
 		if (Is_FBE) {
-			gui_msg(Msg(msg::kWarning, "data_media_fbe_msg=TWRP will not recreate /data/media on an FBE device. Please reboot into your rom to create /data/media."));
+			if (Has_Data_Media)
+				Recreate_Media_Folder();
+			gui_msg(Msg(msg::kWarning, "data_media_fbe_msg=TWRP recreated temporary /data/media access for recovery. Please reboot into your rom once to finalize FBE media storage."));
 		} else {
 			if (Has_Data_Media && !Symlink_Mount_Point.empty()) {
 				if (Mount(false))
@@ -2577,8 +2648,33 @@ bool TWPartition::Wipe_F2FS() {
 		return false;
 	}
 
+	/**
+	 * Metadata-encrypted FBE devices store their keys outside userdata, so the
+	 * entire userdata block device must be formatted. Only legacy footer crypto
+	 * needs space reserved at the end of the partition.
+	 */
+	if ((Is_Decrypted && !Decrypted_Block_Device.empty()) ||
+			Crypto_Key_Location != "footer") {
+		NeedPreserveFooter = false;
+	}
+
 	if (Mount_Point == "/data") {
 		needs_casefold = android::base::GetBoolProperty("external_storage.casefold.enabled", false);
+
+		// Drop a stale dm-default-key mapping before writing the raw userdata
+		// block device. Wipe_Encryption clears the in-memory decrypted state,
+		// but the kernel mapping can still exist until it is explicitly removed.
+		if (TWFunc::Path_Exists("/dev/block/mapper/userdata")) {
+			int dm_ret = -1;
+			if (TWFunc::Path_Exists("/system/bin/dmctl"))
+				dm_ret = TWFunc::Exec_Cmd("/system/bin/dmctl delete userdata", false);
+			if (dm_ret != 0 && TWFunc::Path_Exists("/system/bin/dmsetup"))
+				dm_ret = TWFunc::Exec_Cmd("/system/bin/dmsetup remove userdata", false);
+			if (dm_ret != 0)
+				LOGINFO("Unable to remove the stale userdata mapper; continuing with the raw block device.\n");
+			else
+				usleep(32768);
+		}
 	}
 
 	unsigned long long dev_sz = TWFunc::IOCTL_Get_Block_Size(Actual_Block_Device.c_str());
@@ -2601,31 +2697,12 @@ bool TWPartition::Wipe_F2FS() {
 
 	f2fs_command += " " + Actual_Block_Device + " " + dev_sz_str;
 
-	if (TWFunc::Path_Exists("/system/bin/sload_f2fs")) {
-		f2fs_command += " && sload_f2fs -t /data " + Actual_Block_Device;
-	}
-
-	/**
-	 * On decrypted devices, IOCTL_Get_Block_Size calculates size on device mapper,
-	 * so there's no need to preserve footer.
-	 */
-	if ((Is_Decrypted && !Decrypted_Block_Device.empty()) ||
-			Crypto_Key_Location != "footer") {
-		NeedPreserveFooter = false;
-	}
 	LOGINFO("make_f2fs command: %s\n", f2fs_command.c_str());
-
-	#ifdef TW_USE_DMCTL
-	if (TWFunc::Path_Exists("/dev/block/mapper/userdata")) {
-		LOGINFO("TWRP: running dmctl before formatting...\n");
-		TWFunc::Exec_Cmd("dmctl delete userdata", false);
-		usleep(32768);
-	}
-	#endif
 
 	if (TWFunc::Exec_Cmd(f2fs_command) == 0) {
 		if (NeedPreserveFooter)
 			Wipe_Crypto_Key();
+		Current_File_System = "f2fs";
 		Recreate_AndSec_Folder();
 		gui_msg("done=Done.");
 		return true;
@@ -3128,6 +3205,10 @@ bool TWPartition::Restore_Image(PartitionSettings *part_settings) {
 }
 
 bool TWPartition::Update_Size(bool Display_Error) {
+	return Update_Size(Display_Error, true);
+}
+
+bool TWPartition::Update_Size(bool Display_Error, bool Calculate_Backup_Size) {
 	bool ret = false, Was_Already_Mounted = false, ro = false;
 
 	Find_Actual_Block_Device();
@@ -3164,7 +3245,7 @@ bool TWPartition::Update_Size(bool Display_Error) {
 		}
 	}
 
-	if (Has_Data_Media) {
+	if (Has_Data_Media && Calculate_Backup_Size) {
 		if (Mount(Display_Error)) {
 			Used = backup_exclusions.Get_Folder_Size(Mount_Point);
 			Backup_Size = Used;
@@ -3232,7 +3313,9 @@ bool TWPartition::Find_Wildcard_Block_Devices(const string& Device) {
 		part->Wildcard_Block_Device = false;
 		part->Is_SubPartition = true;
 		part->SubPartition_Of = Mount_Point;
-		part->Is_Storage = Is_Storage;
+		// A wildcard USB parent can be hidden from the storage picker while its
+		// real block-device children remain selectable.
+		part->Is_Storage = Is_Storage || collapse_usb_otg;
 		part->Can_Be_Mounted = true;
 		part->Removable = true;
 		part->Can_Be_Wiped = Can_Be_Wiped;
@@ -3315,7 +3398,27 @@ void TWPartition::Recreate_Media_Folder(void) {
 	string Media_Path = Mount_Point + "/media";
 
 	if (Is_FBE) {
-		LOGINFO("Not recreating media folder on FBE\n");
+		const string User_Media_Path = Media_Path + "/0";
+		LOGINFO("Recreating %s for FBE data-media after format.\n", User_Media_Path.c_str());
+		if (!Mount(true)) {
+			gui_msg(Msg(msg::kError, "recreate_folder_err=Unable to recreate {1} folder.")(User_Media_Path));
+			return;
+		}
+		TWFunc::Recursive_Mkdir(User_Media_Path);
+		chmod(Media_Path.c_str(), 0770);
+		chmod(User_Media_Path.c_str(), 0770);
+		if (!Symlink_Mount_Point.empty()) {
+			umount2(Symlink_Mount_Point.c_str(), MNT_DETACH);
+			if (mount(User_Media_Path.c_str(), Symlink_Mount_Point.c_str(), "", MS_BIND, NULL) != 0) {
+				LOGINFO("Unable to bind mount %s to %s: %s\n",
+					User_Media_Path.c_str(), Symlink_Mount_Point.c_str(), strerror(errno));
+			} else {
+				LOGINFO("Bind mounted %s to %s after formatting data.\n",
+					User_Media_Path.c_str(), Symlink_Mount_Point.c_str());
+			}
+		}
+		if (Is_Storage && MTP_Storage_ID > 0)
+			PartitionManager.Add_MTP_Storage(MTP_Storage_ID);
 		return;
 	}
 	if (!Mount(true)) {

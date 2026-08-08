@@ -186,6 +186,34 @@
 		<page name="main2">
 			<template name="page"/>
 
+			<action>
+				<conditions>
+					<condition var1="tw_has_mtp" var2="1"/>
+					<condition var1="tw_is_decrypted" var2="1"/>
+					<condition var1="tw_mtp_enabled" var2="0"/>
+					<condition var1="tw_mtp_autostart_done" var2="0"/>
+				</conditions>
+				<actions>
+					<action function="set">tw_mtp_autostart_done=1</action>
+					<action function="sleep">500000</action>
+					<action function="startmtp"/>
+				</actions>
+			</action>
+
+			<action>
+				<conditions>
+					<condition var1="tw_has_mtp" var2="1"/>
+					<condition var1="tw_is_encrypted" var2="0"/>
+					<condition var1="tw_mtp_enabled" var2="0"/>
+					<condition var1="tw_mtp_autostart_done" var2="0"/>
+				</conditions>
+				<actions>
+					<action function="set">tw_mtp_autostart_done=1</action>
+					<action function="sleep">500000</action>
+					<action function="startmtp"/>
+				</actions>
+			</action>
+
 			<text style="text_l">
 				<placement x="%col1_x_header%" y="%row3_header_y%"/>
 				<text>{@twrp_header=Team Win Recovery Project}</text>
@@ -1129,6 +1157,12 @@
 				<text>{@invalid_part_sel=Invalid partition selection}</text>
 			</text>
 
+			<text style="text_m_fail">
+				<condition var1="partitionlisterror" var2="2"/>
+				<placement x="%center_x%" y="%row17_y%" placement="5"/>
+				<text>{@virtual_part_fs=Virtual item: select Data for file-system operations}</text>
+			</text>
+
 			<button style="main_button_half_height_full_width">
 				<placement x="%indent%" y="%row18a_y%"/>
 				<text>{@repair_change_btn=Repair or Change File System}</text>
@@ -1235,6 +1269,84 @@
 			<action>
 				<condition var1="tw_confirm_formatdata" op="=" var2="yes"/>
 				<actions>
+					<action function="set">tw_operation_state=0</action>
+					<action function="set">tw_operation_status=1</action>
+					<action function="set">tw_vab_guard_started=0</action>
+					<action function="page">formatdata_vab_check</action>
+				</actions>
+			</action>
+
+			<action>
+				<condition var1="tw_confirm_formatdata" op="!=" var2="yes"/>
+				<action function="page">formatdata</action>
+			</action>
+		</page>
+
+		<page name="formatdata_vab_check">
+			<template name="page"/>
+
+			<text style="text_l">
+				<placement x="%col1_x_header%" y="%row3_header_y%"/>
+				<text>{@format_data_hdr=Format Data}</text>
+			</text>
+
+			<text style="text_m">
+				<placement x="%center_x%" y="%row7_y%" placement="5"/>
+				<text>{@format_data_undo=This cannot be undone.}</text>
+			</text>
+
+			<template name="progress_bar"/>
+
+			<action>
+				<conditions>
+					<condition var1="tw_operation_state" op="=" var2="0"/>
+					<condition var1="tw_vab_guard_started" op="=" var2="0"/>
+				</conditions>
+				<actions>
+					<action function="set">tw_vab_guard_started=1</action>
+					<action function="cmd">/system/bin/twrp-vab-format-guard.sh</action>
+				</actions>
+			</action>
+
+			<action>
+				<conditions>
+					<condition var1="tw_operation_state" op="=" var2="1"/>
+					<condition var1="tw_operation_status" op="=" var2="0"/>
+				</conditions>
+				<action function="page">formatdata_vab_ready</action>
+			</action>
+
+			<action>
+				<conditions>
+					<condition var1="tw_operation_state" op="=" var2="1"/>
+					<condition var1="tw_operation_status" op="!=" var2="0"/>
+				</conditions>
+				<action function="page">formatdata_vab_blocked</action>
+			</action>
+		</page>
+
+		<page name="formatdata_vab_ready">
+			<template name="page"/>
+
+			<text style="text_l">
+				<placement x="%col1_x_header%" y="%row3_header_y%"/>
+				<text>{@format_data_hdr=Format Data}</text>
+			</text>
+
+			<text style="text_m">
+				<placement x="%center_x%" y="%row6_y%" placement="5"/>
+				<text>{@format_data_ptr1=Format Data will wipe all of your apps,}</text>
+			</text>
+
+			<text style="text_m_fail">
+				<placement x="%center_x%" y="%row8_y%" placement="5"/>
+				<text>{@format_data_undo=This cannot be undone.}</text>
+			</text>
+
+			<button style="main_button">
+				<placement x="%indent%" y="%row17_y%"/>
+				<text>{@format_data_btn=Format Data}</text>
+				<actions>
 					<action function="set">tw_back=formatdata</action>
 					<action function="set">tw_action=wipe</action>
 					<action function="set">tw_action_param=DATAMEDIA</action>
@@ -1242,11 +1354,202 @@
 					<action function="set">tw_complete_text1={@format_data_complete=Data Format Complete}</action>
 					<action function="page">action_page</action>
 				</actions>
+			</button>
+
+			<button style="main_button">
+				<placement x="%indent%" y="%row20_y%"/>
+				<text>{@back_btn=Back}</text>
+				<action function="page">formatdata</action>
+			</button>
+
+			<action>
+				<touch key="home"/>
+				<action function="page">main</action>
 			</action>
 
 			<action>
-				<condition var1="tw_confirm_formatdata" op="!=" var2="yes"/>
+				<touch key="back"/>
 				<action function="page">formatdata</action>
+			</action>
+		</page>
+
+		<page name="formatdata_vab_blocked">
+			<template name="page"/>
+
+			<text style="text_l">
+				<placement x="%col1_x_header%" y="%row3_header_y%"/>
+				<text>{@format_data_vab_blocked_hdr=Format Data Blocked}</text>
+			</text>
+
+			<text style="text_m_fail">
+				<placement x="%center_x%" y="%row5_y%" placement="5"/>
+				<text>{@format_data_vab_blocked_1=Virtual A/B snapshot state detected.}</text>
+			</text>
+
+			<text style="text_m">
+				<placement x="%center_x%" y="%row7_y%" placement="5"/>
+				<text>{@format_data_vab_blocked_2=Boot the newly installed system first.}</text>
+			</text>
+
+			<text style="text_m">
+				<placement x="%center_x%" y="%row9_y%" placement="5"/>
+				<text>{@format_data_vab_blocked_3=Format Data was cancelled to protect the ROM.}</text>
+			</text>
+
+			<button style="main_button_half_height">
+				<placement x="%indent%" y="%row18a_y%"/>
+				<text>{@back_btn=Back}</text>
+				<action function="page">formatdata</action>
+			</button>
+
+			<button style="main_button_half_height">
+				<placement x="%center_x%" y="%row18a_y%"/>
+				<text>{@format_data_vab_force_btn=Custom ROM / Force Format}</text>
+				<action function="page">formatdata_vab_force_warning</action>
+			</button>
+
+			<action>
+				<touch key="home"/>
+				<action function="page">main</action>
+			</action>
+
+			<action>
+				<touch key="back"/>
+				<action function="page">formatdata</action>
+			</action>
+		</page>
+
+		<page name="formatdata_vab_force_warning">
+			<template name="page"/>
+
+			<text style="text_l">
+				<placement x="%col1_x_header%" y="%row3_header_y%"/>
+				<text>{@format_data_vab_force_hdr=Force Format Data}</text>
+			</text>
+
+			<text style="text_m_fail">
+				<placement x="%center_x%" y="%row6_y%" placement="5"/>
+				<text>{@format_data_vab_force_1=Only use this after installing a custom ROM.}</text>
+			</text>
+
+			<text style="text_m_fail">
+				<placement x="%center_x%" y="%row8_y%" placement="5"/>
+				<text>{@format_data_vab_force_2=Do not continue while an OTA is merging.}</text>
+			</text>
+
+			<text style="text_m">
+				<placement x="%center_x%" y="%row10_y%" placement="5"/>
+				<text>{@format_data_vab_force_3=The pending system update may be destroyed.}</text>
+			</text>
+
+			<text style="text_m_accent">
+				<placement x="%center_x%" y="%row12_y%" placement="5"/>
+				<text>{@format_data_undo=This cannot be undone.}</text>
+			</text>
+
+			<button style="main_button_half_height">
+				<placement x="%indent%" y="%row18a_y%"/>
+				<text>{@back_btn=Back}</text>
+				<action function="page">formatdata_vab_blocked</action>
+			</button>
+
+			<button style="main_button_half_height">
+				<placement x="%center_x%" y="%row18a_y%"/>
+				<text>{@format_data_vab_force_confirm=I understand the risk}</text>
+				<actions>
+					<action function="set">tw_operation_state=0</action>
+					<action function="set">tw_operation_status=1</action>
+					<action function="set">tw_vab_guard_started=0</action>
+					<action function="page">formatdata_vab_force_check</action>
+				</actions>
+			</button>
+
+			<action>
+				<touch key="home"/>
+				<action function="page">main</action>
+			</action>
+
+			<action>
+				<touch key="back"/>
+				<action function="page">formatdata_vab_blocked</action>
+			</action>
+		</page>
+
+		<page name="formatdata_vab_force_check">
+			<template name="page"/>
+
+			<text style="text_l">
+				<placement x="%col1_x_header%" y="%row3_header_y%"/>
+				<text>{@format_data_vab_force_hdr=Force Format Data}</text>
+			</text>
+
+			<text style="text_m">
+				<placement x="%center_x%" y="%row7_y%" placement="5"/>
+				<text>{@format_data_undo=This cannot be undone.}</text>
+			</text>
+
+			<template name="progress_bar"/>
+
+			<action>
+				<conditions>
+					<condition var1="tw_operation_state" op="=" var2="0"/>
+					<condition var1="tw_vab_guard_started" op="=" var2="0"/>
+				</conditions>
+				<actions>
+					<action function="set">tw_vab_guard_started=1</action>
+					<action function="cmd">/system/bin/twrp-vab-format-guard.sh --force</action>
+				</actions>
+			</action>
+
+			<action>
+				<conditions>
+					<condition var1="tw_operation_state" op="=" var2="1"/>
+					<condition var1="tw_operation_status" op="=" var2="0"/>
+				</conditions>
+				<action function="page">formatdata_vab_ready</action>
+			</action>
+
+			<action>
+				<conditions>
+					<condition var1="tw_operation_state" op="=" var2="1"/>
+					<condition var1="tw_operation_status" op="!=" var2="0"/>
+				</conditions>
+				<action function="page">formatdata_vab_merging</action>
+			</action>
+		</page>
+
+		<page name="formatdata_vab_merging">
+			<template name="page"/>
+
+			<text style="text_l">
+				<placement x="%col1_x_header%" y="%row3_header_y%"/>
+				<text>{@format_data_vab_merging_hdr=Format Data Still Blocked}</text>
+			</text>
+
+			<text style="text_m_fail">
+				<placement x="%center_x%" y="%row7_y%" placement="5"/>
+				<text>{@format_data_vab_merging_1=A Virtual A/B snapshot is actively merging.}</text>
+			</text>
+
+			<text style="text_m">
+				<placement x="%center_x%" y="%row9_y%" placement="5"/>
+				<text>{@format_data_vab_merging_2=Wait for the merge to finish before formatting.}</text>
+			</text>
+
+			<button style="main_button">
+				<placement x="%indent%" y="%row19_y%"/>
+				<text>{@back_btn=Back}</text>
+				<action function="page">formatdata_vab_blocked</action>
+			</button>
+
+			<action>
+				<touch key="home"/>
+				<action function="page">main</action>
+			</action>
+
+			<action>
+				<touch key="back"/>
+				<action function="page">formatdata_vab_blocked</action>
 			</action>
 		</page>
 
@@ -1324,7 +1627,10 @@
 
 		<page name="checkpartitionlist">
 			<action>
-				<condition var1="tw_check_partition_list" op="=" var2="1"/>
+				<conditions>
+					<condition var1="tw_check_partition_list" op="=" var2="1"/>
+					<condition var1="tw_check_partition_virtual" op="=" var2="0"/>
+				</conditions>
 				<actions>
 					<action function="set">partitionlisterror=0</action>
 					<action function="getpartitiondetails">tw_wipe_list</action>
@@ -1333,7 +1639,18 @@
 			</action>
 
 			<action>
-				<condition var1="tw_check_partition_list" op="!=" var2="1"/>
+				<condition var1="tw_check_partition_virtual" op="!=" var2="0"/>
+				<actions>
+					<action function="set">partitionlisterror=2</action>
+					<action function="page">advancedwipe</action>
+				</actions>
+			</action>
+
+			<action>
+				<conditions>
+					<condition var1="tw_check_partition_list" op="!=" var2="1"/>
+					<condition var1="tw_check_partition_virtual" op="=" var2="0"/>
+				</conditions>
 				<actions>
 					<action function="set">partitionlisterror=1</action>
 					<action function="page">advancedwipe</action>

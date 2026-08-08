@@ -26,6 +26,8 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/reboot.h>
+#include <signal.h>
 #include <linux/input.h>
 #include <time.h>
 #include <unistd.h>
@@ -34,6 +36,7 @@
 #include <dirent.h>
 #include <private/android_filesystem_config.h>
 #include <android-base/properties.h>
+#include <android-base/strings.h>
 #include <fstream>
 
 #include <string>
@@ -425,32 +428,85 @@ int GUIAction::flash_zip(std::string filename, int* wipe_cache)
 		if (strcmp(apex_enabled, "true") == 0) {
 			umount("/apex");
 		}
-		// Backup current recovery before flashing ROM
-		std::string slot_suffix = android::base::GetProperty("ro.boot.slot_suffix", "");
-		if (slot_suffix.empty())
-			slot_suffix = android::base::GetProperty("ro.boot.slot", "");
-		std::string recovery_src;
-		if (slot_suffix == "_a" || slot_suffix == "a")
-			recovery_src = "/dev/block/bootdevice/by-name/recovery_a";
-		else
-			recovery_src = "/dev/block/bootdevice/by-name/recovery_b";
+		const bool auto_reflash = DataManager::GetIntValue(TW_AUTO_REFLASHTWRP_VAR) != 0;
+		unlink("/tmp/recovery_backup.img");
+		if (auto_reflash) {
+			std::string slot_suffix = PartitionManager.Get_Active_Slot_Suffix();
+			std::string recovery_src;
+			if (slot_suffix == "_a")
+				recovery_src = "/dev/block/bootdevice/by-name/recovery_a";
+			else if (slot_suffix == "_b")
+				recovery_src = "/dev/block/bootdevice/by-name/recovery_b";
 
-		std::string backup_cmd = "dd bs=1048576 if=" + recovery_src + " of=/tmp/recovery_backup.img 2>/dev/null";
-		if (TWFunc::Exec_Cmd(backup_cmd) == 0) {
-			LOGINFO("Backed up current recovery to /tmp/recovery_backup.img\n");
-		} else {
-			LOGERR("Failed to backup current recovery\n");
+			if (recovery_src.empty()) {
+				gui_msg(Msg(msg::kError, "reflash_twrp_slot_unknown=Unable to determine the active slot; TWRP was not backed up."));
+			} else if (!TWFunc::Path_Exists(recovery_src)) {
+				gui_msg(Msg(msg::kError, "reflash_twrp_source_missing=Active recovery partition was not found; TWRP was not backed up."));
+			} else {
+				std::string backup_cmd = "dd bs=1048576 if=" + recovery_src +
+					" of=/tmp/recovery_backup.img conv=fsync 2>/dev/null";
+				if (TWFunc::Exec_Cmd(backup_cmd) == 0) {
+					LOGINFO("Backed up current recovery from %s\n", recovery_src.c_str());
+				} else {
+					LOGERR("Failed to backup current recovery from %s\n", recovery_src.c_str());
+					unlink("/tmp/recovery_backup.img");
+				}
+			}
 		}
 
-		ret_val = TWinstall_zip(filename.c_str(), wipe_cache, (bool) !DataManager::GetIntValue(TW_SKIP_DIGEST_CHECK_ZIP_VAR));
-		PartitionManager.Unlock_Block_Partitions();
+			DataManager::SetValue("tw_zip_is_update_package", 0);
+			DataManager::SetValue("tw_rom_update_requires_reboot", 0);
+			const std::string original_slot = PartitionManager.Get_Active_Slot_Display();
+			ret_val = TWinstall_zip(filename.c_str(), wipe_cache, (bool) !DataManager::GetIntValue(TW_SKIP_DIGEST_CHECK_ZIP_VAR));
+				std::string requested_slot;
+				{
+					std::ifstream requested_slot_file("/tmp/twrp_requested_slot");
+					if (requested_slot_file.good()) {
+						std::getline(requested_slot_file, requested_slot);
+						requested_slot = android::base::Trim(requested_slot);
+					}
+				}
+				unlink("/tmp/twrp_requested_slot");
+				if (requested_slot == "A" || requested_slot == "B") {
+					LOGINFO("Updater requested active slot %s via bootctl wrapper\n", requested_slot.c_str());
+					if (PartitionManager.Get_Active_Slot_Display() != requested_slot) {
+						gui_print("Switching active slot to %s\n", requested_slot.c_str());
+						PartitionManager.Set_Active_Slot(requested_slot, true);
+						PartitionManager.Unlock_Block_Partitions();
+						DataManager::SetValue("tw_rom_update_requires_reboot", 1);
+					}
+				}
+				const bool is_rom_update = DataManager::GetIntValue("tw_zip_is_update_package") != 0;
+				const std::string post_install_slot = PartitionManager.Get_Active_Slot_Display();
+				const bool slot_changed = !original_slot.empty() && !post_install_slot.empty() && post_install_slot != original_slot;
+				const bool has_recovery_backup = TWFunc::Path_Exists("/tmp/recovery_backup.img");
+				const bool should_reflash = auto_reflash && has_recovery_backup && (ret_val == 0 || slot_changed);
+				LOGINFO("Auto-reflash check: enabled=%d is_rom_update=%d ret=%d slot_changed=%d backup=%d\n",
+					auto_reflash, is_rom_update, ret_val, slot_changed, has_recovery_backup);
+
+			if (ret_val != 0 && slot_changed) {
+				LOGINFO("Zip install returned %i after active slot changed from %s to %s; keeping new active slot.\n",
+					ret_val, original_slot.c_str(), post_install_slot.c_str());
+				PartitionManager.Unlock_Block_Partitions();
+				DataManager::SetValue("tw_rom_update_requires_reboot", 1);
+				gui_warn("rom_update_slot_kept=Zip returned an error after changing active slot. Keeping the new slot; reboot before mounting dynamic partitions or flashing another package.");
+			}
+
+			// A failed kernel/module zip must not tear down the current dynamic
+			// partition mappings. After a successful ROM update, however, the
+			// mappings refer to the old super metadata and must not be reused.
+		if (is_rom_update && ret_val == 0) {
+			PartitionManager.Unlock_Block_Partitions();
+			DataManager::SetValue("tw_rom_update_requires_reboot", 1);
+			gui_warn("rom_update_reboot_recovery=ROM updated. Reboot recovery before mounting System/Vendor or flashing another package.");
+		}
 
 		// Auto-reflash TWRP after flashing ROM if user checked the option
-		if (DataManager::GetIntValue(TW_AUTO_REFLASHTWRP_VAR) != 0) {
+		if (should_reflash) {
 			gui_msg("reflash_twrp_after_zip=Reflashing TWRP...");
 			if (TWFunc::Path_Exists("/tmp/recovery_backup.img")) {
-				std::string cmd_a = "dd bs=1048576 if=/tmp/recovery_backup.img of=/dev/block/bootdevice/by-name/recovery_a 2>/dev/null";
-				std::string cmd_b = "dd bs=1048576 if=/tmp/recovery_backup.img of=/dev/block/bootdevice/by-name/recovery_b 2>/dev/null";
+				std::string cmd_a = "dd bs=1048576 if=/tmp/recovery_backup.img of=/dev/block/bootdevice/by-name/recovery_a conv=fsync 2>/dev/null";
+				std::string cmd_b = "dd bs=1048576 if=/tmp/recovery_backup.img of=/dev/block/bootdevice/by-name/recovery_b conv=fsync 2>/dev/null";
 				int ret_a = TWFunc::Exec_Cmd(cmd_a);
 				int ret_b = TWFunc::Exec_Cmd(cmd_b);
 				if (ret_a == 0 && ret_b == 0) {
@@ -462,11 +518,18 @@ int GUIAction::flash_zip(std::string filename, int* wipe_cache)
 			} else {
 				gui_msg(Msg(msg::kError, "reflash_twrp_err=Recovery backup not found, unable to reflash TWRP."));
 			}
+		} else {
+			unlink("/tmp/recovery_backup.img");
 		}
 
-		// Now, check if we need to ensure TWRP remains installed...
+		// Legacy boot-ramdisk devices may provide installTwrp in /system.
+		// recovery_a/recovery_b devices are already handled by the raw
+		// recovery backup above; running a stale system-side installer after
+		// super was replaced can corrupt the post-update state.
 		struct stat st;
-		if (stat("/system/bin/installTwrp", &st) == 0)
+		if (ret_val == 0 && is_rom_update &&
+				!TWFunc::Path_Exists("/dev/block/bootdevice/by-name/recovery_a") &&
+				stat("/system/bin/installTwrp", &st) == 0)
 		{
 			DataManager::SetValue("tw_operation", "Configuring TWRP");
 			DataManager::SetValue("tw_partition", "");
@@ -609,7 +672,74 @@ void GUIAction::operation_end(const int operation_status)
 
 int GUIAction::reboot(std::string arg)
 {
-	sync();
+	const bool direct_system_reboot = android::base::GetBoolProperty(
+		"twrp.recovery.direct_system_reboot", false);
+	if (direct_system_reboot && (arg.empty() || arg == "system")) {
+		LOGINFO("Direct GUI system reboot entered\n");
+
+		// Leave WLAN idle, but never let a wedged WCN7750 command prevent the
+		// reboot syscall. Run cleanup in a child and cap it at one second.
+		pid_t wlan_pid = fork();
+		if (wlan_pid == 0) {
+			TWFunc::Exec_Cmd("killall wpa_supplicant 2>/dev/null");
+			TWFunc::Exec_Cmd("/system/bin/ip link set wlan0 down 2>/dev/null");
+			TWFunc::Exec_Cmd("killall android.hardware.wifi-service cnss-daemon 2>/dev/null");
+			_exit(0);
+		}
+		if (wlan_pid > 0) {
+			int status = 0;
+			bool stopped = false;
+			for (int retry = 0; retry < 20; ++retry) {
+				if (waitpid(wlan_pid, &status, WNOHANG) == wlan_pid) {
+					stopped = true;
+					break;
+				}
+				usleep(50000);
+			}
+			if (!stopped) {
+				LOGERR("Reboot WLAN cleanup timed out; forcing restart path\n");
+				kill(wlan_pid, SIGKILL);
+				waitpid(wlan_pid, &status, 0);
+			}
+		}
+		DataManager::SetValue("tw_wlan_connected", 0);
+
+		// Give dirty recovery writes a bounded opportunity to reach storage.
+		// The parent never waits indefinitely on a blocked filesystem.
+		pid_t sync_pid = fork();
+		if (sync_pid == 0) {
+			sync();
+			_exit(0);
+		}
+		if (sync_pid > 0) {
+			int status = 0;
+			bool synced = false;
+			for (int retry = 0; retry < 30; ++retry) {
+				if (waitpid(sync_pid, &status, WNOHANG) == sync_pid) {
+					synced = true;
+					break;
+				}
+				usleep(50000);
+			}
+			if (!synced) {
+				LOGERR("Reboot sync timed out; continuing with kernel reboot\n");
+				kill(sync_pid, SIGKILL);
+				waitpid(sync_pid, &status, 0);
+			}
+		}
+
+		LOGINFO("Direct GUI system reboot: invoking kernel restart\n");
+		property_set("sys.powerctl", "reboot,");
+		if (::reboot(RB_AUTOBOOT) == 0)
+			return 0;
+		LOGERR("Kernel restart returned; handing off to recovery main loop\n");
+	}
+
+	if (!direct_system_reboot)
+		sync();
+
+	// The direct reboot worker performs its own bounded flush. Other devices
+	// retain the standard synchronous handoff.
 	DataManager::SetValue("tw_gui_done", 1);
 	DataManager::SetValue("tw_reboot_arg", arg);
 
@@ -924,6 +1054,7 @@ int GUIAction::checkpartitionlist(std::string arg)
 {
 	string List, part_path;
 	int count = 0;
+	int virtual_selection = 0;
 
 	if (arg.empty())
 		arg = "tw_wipe_list";
@@ -934,8 +1065,12 @@ int GUIAction::checkpartitionlist(std::string arg)
 		while (end_pos != string::npos && start_pos < List.size()) {
 			part_path = List.substr(start_pos, end_pos - start_pos);
 			LOGINFO("checkpartitionlist part_path '%s'\n", part_path.c_str());
-			if (part_path == "/and-sec" || part_path == "DALVIK" || part_path == "INTERNAL") {
-				// Do nothing
+			if (part_path == "INTERNAL") {
+				virtual_selection = 1;
+			} else if (part_path == "DALVIK") {
+				virtual_selection = 2;
+			} else if (part_path == "/and-sec") {
+				virtual_selection = 3;
 			} else {
 				count++;
 			}
@@ -943,8 +1078,10 @@ int GUIAction::checkpartitionlist(std::string arg)
 			end_pos = List.find(";", start_pos);
 		}
 		DataManager::SetValue("tw_check_partition_list", count);
+		DataManager::SetValue("tw_check_partition_virtual", virtual_selection);
 	} else {
 		DataManager::SetValue("tw_check_partition_list", 0);
+		DataManager::SetValue("tw_check_partition_virtual", 0);
 	}
 	return 0;
 }
@@ -1171,6 +1308,12 @@ int GUIAction::wipe(std::string arg)
 	operation_start("Format");
 	DataManager::SetValue("tw_partition", arg);
 	int ret_val = false;
+
+	if (simulate && arg == "DATAMEDIA") {
+		LOGINFO("Format Data requested while simulate mode is enabled; disabling simulate mode for safety.\n");
+		DataManager::SetValue(TW_SIMULATE_ACTIONS, 0);
+		simulate = 0;
+	}
 
 	if (simulate) {
 		simulate_progress_bar();
@@ -1434,6 +1577,21 @@ int GUIAction::cmd(std::string arg)
 	if (simulate) {
 		simulate_progress_bar();
 	} else {
+		if (android::base::StartsWith(arg, "rm -rf \"")) {
+			size_t path_start = strlen("rm -rf \"");
+			size_t path_end = arg.find('"', path_start);
+			if (path_end != std::string::npos) {
+				std::string target = arg.substr(path_start, path_end - path_start);
+				TWPartition* part = PartitionManager.Find_Partition_By_Path(target);
+				if (part != nullptr &&
+					(part->Current_File_System == "erofs" || part->Current_File_System == "squashfs")) {
+					gui_msg(Msg(msg::kError,
+						"fm_read_only_fs=This file is on a read-only {1} partition and cannot be deleted directly. Use a systemless module or rebuild the ROM.")(part->Current_File_System));
+					operation_end(1);
+					return 0;
+				}
+			}
+		}
 		op_status = TWFunc::Exec_Cmd(arg);
 		if (op_status != 0)
 			op_status = 1;
@@ -1564,13 +1722,23 @@ int GUIAction::decrypt(std::string arg __unused)
 	if (simulate) {
 		simulate_progress_bar();
 	} else {
-		string Password;
-		string userID;
-		DataManager::GetValue("tw_crypto_password", Password);
+			string Password;
+			string userID;
+			DataManager::GetValue("tw_crypto_password", Password);
+			char fbe_contents[PROPERTY_VALUE_MAX];
+			property_get("fbe.contents", fbe_contents, "");
+			if (!DataManager::GetIntValue(TW_IS_FBE) && fbe_contents[0] != '\0') {
+				LOGINFO("FBE properties are present but tw_is_fbe=0; forcing FBE user 0 decrypt path\n");
+				DataManager::SetValue(TW_IS_FBE, 1);
+				DataManager::SetValue("tw_crypto_user_id", "0");
+			}
+			LOGINFO("GUI decrypt request: tw_is_fbe=%d, tw_crypto_pwtype=%d, password_len=%zu\n",
+				DataManager::GetIntValue(TW_IS_FBE), DataManager::GetIntValue(TW_CRYPTO_PWTYPE), Password.size());
 
-		if (DataManager::GetIntValue(TW_IS_FBE)) {  // for FBE
-			DataManager::GetValue("tw_crypto_user_id", userID);
-			if (userID != "") {
+			if (DataManager::GetIntValue(TW_IS_FBE)) {  // for FBE
+				DataManager::GetValue("tw_crypto_user_id", userID);
+				LOGINFO("GUI decrypt FBE user id: '%s'\n", userID.c_str());
+				if (userID != "") {
 				op_status = PartitionManager.Decrypt_Device(Password, atoi(userID.c_str()));
 				if (userID != "0") {
 					if (op_status != 0)
@@ -2005,7 +2173,7 @@ int GUIAction::setbootslot(std::string arg)
 				PartitionManager.UnMount_By_Path("/vendor", false, MNT_DETACH);
 			}
 		}
-		PartitionManager.Set_Active_Slot(arg);
+		PartitionManager.Set_Active_Slot(arg, false);
 	} else {
 		simulate_progress_bar();
 	}
@@ -2453,7 +2621,9 @@ int GUIAction::wlanstart(string arg __unused) {
 	}
 
 	// Create control directory and wpa_supplicant config
+	TWFunc::Exec_Cmd("killall wpa_supplicant 2>/dev/null");
 	TWFunc::Exec_Cmd("mkdir -p /tmp/recovery/sockets");
+	TWFunc::Exec_Cmd("rm -f /tmp/recovery/sockets/wlan0");
 	TWFunc::Exec_Cmd("echo ctrl_interface=DIR=/tmp/recovery/sockets GROUP=0 > /tmp/recovery/wpa_supplicant.conf");
 	TWFunc::Exec_Cmd("cat /vendor/etc/wifi/wpa_supplicant.conf >> /tmp/recovery/wpa_supplicant.conf 2>/dev/null");
 
@@ -2469,10 +2639,31 @@ int GUIAction::wlanstart(string arg __unused) {
 	}
 
 	// Start wpa_supplicant
-	ret = TWFunc::Exec_Cmd("LD_LIBRARY_PATH=/sbin/lib64:/vendor/lib64:/system/lib64 /sbin/wpa_supplicant -B -iwlan0 -Dnl80211 -c/tmp/recovery/wpa_supplicant.conf -O/tmp/recovery/sockets");
+	// Use the system binder runtime before the vendor namespace. The AIDL
+	// supplicant otherwise opens vndbinder and exits after a mixed-Parcel error.
+	ret = TWFunc::Exec_Cmd("LD_LIBRARY_PATH=/sbin/lib64:/system/lib64:/system_ext/lib64:/vendor/lib64 /sbin/wpa_supplicant -B -iwlan0 -Dnl80211 -c/tmp/recovery/wpa_supplicant.conf -O/tmp/recovery/sockets");
 	if (ret != 0) {
 		if (logBox) logBox->AddLogLine("[ERROR] Failed to start wpa_supplicant", "error");
 		LOGERR("Failed to start wpa_supplicant\n");
+		return -1;
+	}
+
+	bool control_ready = false;
+	int stable_checks = 0;
+	for (int retry = 0; retry < 40; ++retry) {
+		if (TWFunc::Path_Exists("/tmp/recovery/sockets/wlan0")) {
+			if (++stable_checks >= 10) {
+				control_ready = true;
+				break;
+			}
+		} else {
+			stable_checks = 0;
+		}
+		usleep(100000);
+	}
+	if (!control_ready) {
+		if (logBox) logBox->AddLogLine("[ERROR] wpa_supplicant exited before control socket was ready", "error");
+		LOGERR("wpa_supplicant control socket was not created\n");
 		return -1;
 	}
 
@@ -2913,16 +3104,46 @@ int GUIAction::wlanconnect(std::string arg __unused) {
     // 请求 IP
     logBox->AddLogLine("[INFO] Wi-Fi link established, requesting IP with DHCP...", "normal");
     gui_forceRender();
-    run_command_get_output("/system/bin/toybox dhcp -i wlan0 -n -q -s /sbin/wifi-dhcp.sh");
-    ::sleep(5); // 等 DHCP 配置完成
+    unlink("/tmp/recovery/wifi-dhcp.lease");
+    int dhcp_rc = TWFunc::Exec_Cmd(
+        "/system/bin/toybox dhcp -i wlan0 -f -n -q -t 5 -T 2 "
+        "-s /sbin/wifi-dhcp.sh");
 
-    // 获取 IP 地址
-    std::string ip_address = run_command_get_output("ifconfig wlan0 | grep 'inet ' | awk -F'[: ]+' '{print $4}'");
+    // The DHCP event script writes the applied lease after address and route
+    // configuration succeed. Read that file instead of parsing tool output.
+    std::string lease_data;
+    for (int retry = 0; retry < 20; ++retry) {
+        if (TWFunc::read_file("/tmp/recovery/wifi-dhcp.lease", lease_data) == 0 &&
+            !lease_data.empty())
+            break;
+        usleep(250000);
+    }
+
+    std::string ip_address;
+    std::string gateway;
+    size_t ip_pos = lease_data.find("ip=");
+    size_t gateway_pos = lease_data.find("gateway=");
+    size_t dns_pos = lease_data.find("dns=");
+    if (ip_pos != std::string::npos && gateway_pos != std::string::npos &&
+        gateway_pos > ip_pos + 3) {
+        ip_address = lease_data.substr(ip_pos + 3, gateway_pos - (ip_pos + 3));
+    }
+    if (gateway_pos != std::string::npos) {
+        size_t gateway_end = dns_pos == std::string::npos ? lease_data.size() : dns_pos;
+        if (gateway_end > gateway_pos + 8)
+            gateway = lease_data.substr(gateway_pos + 8, gateway_end - (gateway_pos + 8));
+    }
+
+    if (dhcp_rc != 0 || ip_address.empty()) {
+        logBox->AddLogLine("[ERROR] DHCP failed: no IPv4 lease was assigned", "error");
+        gui_forceRender();
+        DataManager::SetValue("tw_wlan_connected", 0);
+        return -1;
+    }
+
     while (!ip_address.empty() && (ip_address.back() == '\n' || ip_address.back() == '\r'))
         ip_address.pop_back();
 
-    // 获取网关
-    std::string gateway = run_command_get_output("netstat -rn | grep wlan0 | grep UG | awk '{print $2}'");
     while (!gateway.empty() && (gateway.back() == '\n' || gateway.back() == '\r'))
         gateway.pop_back();
 
@@ -3029,18 +3250,28 @@ int GUIAction::wlantest(std::string arg __unused) {
     logBox->AddLogLine("[INFO] Testing network connectivity...", "normal");
     gui_forceRender();
 
-    const char* ping_bin = "/system/bin/busybox";
+    const char* ping_bin = "/system/bin/toybox";
     const char* iface = "wlan0";
 
-    auto run_ping = [&](const std::string& target, int count = 4) -> std::string {
-        std::string cmd = std::string(ping_bin) + " ping -I " + iface + " -c " + std::to_string(count) + " " + target;
+    if (TWFunc::Exec_Cmd(
+            "echo '0 2147483647' > /proc/sys/net/ipv4/ping_group_range") != 0) {
+        logBox->AddLogLine("[ERROR] Unable to enable ICMP test sockets", "error");
+        gui_forceRender();
+        return -1;
+    }
+
+    auto run_ping = [&](const std::string& target, int count = 4) -> bool {
+        std::string cmd = std::string(ping_bin) + " ping -I " + iface +
+            " -c " + std::to_string(count) + " -W 3 " + target + " 2>&1";
         FILE* fp = popen(cmd.c_str(), "r");
-        if (!fp) return "";
+        if (!fp) return false;
         char buf[256];
         std::string output;
         while (fgets(buf, sizeof(buf), fp)) output += buf;
-        pclose(fp);
-        return output;
+        int status = pclose(fp);
+        LOGINFO("WLAN ping %s: status=%d output=%s\n",
+                target.c_str(), status, output.c_str());
+        return status == 0;
     };
 
     // 自动获取网关
@@ -3060,8 +3291,7 @@ int GUIAction::wlantest(std::string arg __unused) {
     if (!gateway.empty() && gateway != "unknown") {
         logBox->AddLogLine("[INFO] Pinging gateway (" + gateway + ")...", "normal");
         gui_forceRender();
-        std::string gw_result = run_ping(gateway, 1);
-        if (!gw_result.empty() && gw_result.find("0% packet loss") != std::string::npos)
+        if (run_ping(gateway, 1))
             logBox->AddLogLine("[INFO] Gateway ping: OK", "normal");
         else
             logBox->AddLogLine("[ERROR] Gateway ping failed", "error");
@@ -3074,8 +3304,7 @@ int GUIAction::wlantest(std::string arg __unused) {
     std::string dns = "8.8.8.8";
     logBox->AddLogLine("[INFO] Testing DNS (" + dns + ")...", "normal");
     gui_forceRender();
-    std::string dns_result = run_ping(dns, 1);
-    if (!dns_result.empty() && dns_result.find("0% packet loss") != std::string::npos)
+    if (run_ping(dns, 1))
         logBox->AddLogLine("[INFO] DNS ping: OK", "normal");
     else
         logBox->AddLogLine("[ERROR] DNS ping failed", "error");
@@ -3085,8 +3314,7 @@ int GUIAction::wlantest(std::string arg __unused) {
     std::string internet = "bing.com";
     logBox->AddLogLine("[INFO] Testing internet connectivity (" + internet + ")...", "normal");
     gui_forceRender();
-    std::string internet_result = run_ping(internet, 1);
-    if (!internet_result.empty() && internet_result.find("0% packet loss") != std::string::npos)
+    if (run_ping(internet, 1))
         logBox->AddLogLine("[INFO] Internet: OK", "normal");
     else
         logBox->AddLogLine("[ERROR] Internet ping failed", "error");

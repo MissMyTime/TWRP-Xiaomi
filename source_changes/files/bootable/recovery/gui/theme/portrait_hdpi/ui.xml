@@ -73,6 +73,7 @@
 
 	<variables>
 		<variable name="tw_samsung_navbar" value="0" persist="1"/>
+		<variable name="tw_mtp_autostart_done" value="0"/>
 
 		<variable name="tw_hide_kb" value="0"/>
 		<variable name="screen_width" value="1080"/>

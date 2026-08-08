@@ -29,7 +29,7 @@
 		<string name="sdext">SD-EXT</string>
 		<string name="adopted_data">Adopted Data</string>
 		<string name="adopted_storage">Adopted 存储空间</string>
-		<string name="autostorage">存储空间</string>
+		<string name="autostorage">USB-OTG</string>
 		<!-- GUI XML strings -->
 		<string name="twrp_header">Team Win Recovery Project</string>
 		<string name="twrp_watch_header">TWRP %tw_version%</string>
@@ -510,7 +510,7 @@
 		<string name="decrypt_users_selection">选择一位要解密的用户 ID</string>
 		<string name="select_user">选择用户</string>
 		<string name="backup_storage_undecrypt_warning">备份不包含一些属于用户 {1} 的文件，因为该用户没有解密</string>
-		<string name="nezha_goodix_wait">正在等待 Goodix Weaver 稳定后再验证密码…</string>
+		<string name="recovery_hook_wait">正在等待设备安全服务就绪…</string>
 		<string name="decrypting_user_fbe">尝试为用户 {1} 解密 FBE…</string>
 		<string name="decrypt_user_success_fbe">用户 {1} 解密成功</string>
 		<string name="decrypt_user_fail_fbe">用户 {1} 解密失败</string>
@@ -732,10 +732,10 @@
 		<string name="flash_ab_both_slots">刷入到 2 个槽位</string>
 		<string name="ozip_decrypt_decryption">正在解密 Ozip…</string>
 		<string name="ozip_decrypt_finish">Ozip 解密完成！</string>
-		<string name="fastboot_button">Fastboot</string>
+		<string name="fastboot_button">Fastbootd</string>
 		<string name="enable_adb">启用 ADB</string>
 		<string name="enable_fastboot">启用 Fastboot</string>
-		<string name="fastboot_console_msg">进入 Fastboot 模式…</string>
+		<string name="fastboot_console_msg">进入 Fastbootd 模式…</string>
 		<!-- Android Rescue Party trigger -->
 		<string name="rescue_party0">Android 救援程序已触发！您可以尝试下面的操作：</string>
 		<string name="rescue_party1"> 1. 清除 Cache；</string>
@@ -790,5 +790,18 @@
 		<string name="wlan_start_service_btn">启动服务</string>
 		<string name="select_wlan_hdr">选择需要连接的WiFi</string>
 		<string name="next_btn">下一步</string>
+		<string name="format_data_vab_blocked_hdr">已阻止格式化 Data</string>
+		<string name="format_data_vab_blocked_1">检测到 Virtual A/B 快照状态。</string>
+		<string name="format_data_vab_blocked_2">请先启动新安装的系统。</string>
+		<string name="format_data_vab_blocked_3">为保护系统，已取消格式化 Data。</string>
+		<string name="format_data_vab_force_btn">类原生／强制格式化</string>
+		<string name="format_data_vab_force_hdr">强制格式化 Data</string>
+		<string name="format_data_vab_force_1">仅在安装类原生系统后使用此功能。</string>
+		<string name="format_data_vab_force_2">OTA 正在合并时请勿继续。</string>
+		<string name="format_data_vab_force_3">待处理的系统更新可能会被破坏。</string>
+		<string name="format_data_vab_force_confirm">我已了解风险</string>
+		<string name="format_data_vab_merging_hdr">仍然禁止格式化 Data</string>
+		<string name="format_data_vab_merging_1">Virtual A/B 快照正在合并。</string>
+		<string name="format_data_vab_merging_2">请等待合并完成后再格式化。</string>
 	</resources>
 </language>

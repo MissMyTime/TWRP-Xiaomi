@@ -17,6 +17,7 @@
 */
 
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -25,6 +26,7 @@
 #include <map>
 #include <vector>
 #include <dirent.h>
+#include <ctype.h>
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -97,7 +99,33 @@ extern "C" {
 	#include "gui/gui.h"
 }
 
+static bool Is_Usb_Host_Active() {
+	static const char* const role_paths[] = {
+		"/sys/class/usb_role/a600000.ssusb-role-switch/role",
+		"/sys/bus/platform/devices/a600000.ssusb/mode",
+	};
+	for (const char* path : role_paths) {
+		std::string role;
+		if (android::base::ReadFileToString(path, &role)) {
+			role = android::base::Trim(role);
+			if (role == "host")
+				return true;
+			if (role == "device" || role == "peripheral")
+				return false;
+		}
+	}
+
+	char host_active[PROPERTY_VALUE_MAX];
+	property_get("twrp.usb.host_active", host_active, "0");
+	return strcmp(host_active, "1") == 0;
+}
+
 static void Restore_Adb_Configfs() {
+	if (Is_Usb_Host_Active()) {
+		LOGINFO("USB-OTG: host mode active; preserving the host controller\n");
+		return;
+	}
+
 	char controller[PROPERTY_VALUE_MAX];
 	property_get("sys.usb.controller", controller, "a600000.dwc3");
 	std::string cmd =
@@ -157,102 +185,95 @@ std::vector<users_struct> Users_List;
 
 std::string additional_fstab = "/etc/additional.fstab";
 
-static bool Nezha_Goodix_Gate_Present() {
-	return TWFunc::Path_Exists("/system/bin/nezha-goodix-gate.sh");
+namespace android {
+namespace keystore {
+	bool setRecoveryKeyMintEnvironment(bool stock_environment) __attribute__((weak));
+}
 }
 
-static bool Nezha_Prop_Equals(const char* prop, const char* expected) {
-	char value[PROPERTY_VALUE_MAX];
-	property_get(prop, value, "");
-	return strcmp(value, expected) == 0;
-}
-
-static int Nezha_Weaver_Wait_Limit_Seconds() {
-	char route[PROPERTY_VALUE_MAX];
-	property_get("twrp.nezha.crypto_route", route, "");
-	if (strcmp(route, "normal_590") == 0)
-		return 120;
-	if (strcmp(route, "leica_597") == 0)
-		return 75;
-	return 100;
-}
-
-static void Kick_Nezha_Goodix_Gate(bool full_restart) {
-	if (!Nezha_Goodix_Gate_Present())
-		return;
-
-	if (full_restart) {
-		TWFunc::Exec_Cmd("setprop twrp.nezha.weaver_ready 0; "
-			"setprop twrp.nezha.goodix_gate_error ''; "
-			"stop nezha-goodix-gate; "
-			"stop goodix_weaver_hal_service; "
-			"stop secure_element_hal_service; "
-			"killall android.hardware.weaver-service-goodix-recovery 2>/dev/null; "
-			"killall android.hardware.secure_element-service-goodix-recovery 2>/dev/null; "
-			"sleep 1; "
-			"start nezha-goodix-gate", false);
-	} else {
-		TWFunc::Exec_Cmd("setprop twrp.nezha.goodix_gate_error ''; start nezha-goodix-gate", false);
-	}
-}
-
-static bool Wait_For_Nezha_Weaver_Ready() {
-	// Xiaomi 17 Ultra starts its Goodix eSE/Weaver chain after vendor modules
-	// load. Keep credential verification behind that gate so an early submit
-	// cannot be reported as a bad password. If the one-shot gate exited before
-	// reaching ready, restart it here rather than making the user reboot recovery.
-	if (!Nezha_Goodix_Gate_Present())
+static bool Run_Pre_Decrypt_Hook() {
+	static constexpr const char* hook = "/system/bin/twrp-pre-decrypt.sh";
+	if (!TWFunc::Path_Exists(hook))
 		return true;
 
-	if (Nezha_Prop_Equals("twrp.nezha.weaver_ready", "1"))
+	gui_msg("recovery_hook_wait=Waiting for the device security service...");
+	if (TWFunc::Exec_Cmd(hook, false) == 0)
 		return true;
 
-	LOGINFO("nezha: waiting for Goodix Weaver before FBE credential verification\n");
-	gui_msg("nezha_goodix_wait=Waiting for Goodix Weaver before checking password...");
-
-	int restarts = 0;
-	const int limit = Nezha_Weaver_Wait_Limit_Seconds();
-	for (int second = 0; second < limit; second++) {
-		if (Nezha_Prop_Equals("twrp.nezha.weaver_ready", "1")) {
-			LOGINFO("nezha: Goodix Weaver is ready\n");
-			return true;
-		}
-
-		char gate_state[PROPERTY_VALUE_MAX];
-		char error[PROPERTY_VALUE_MAX];
-		property_get("init.svc.nezha-goodix-gate", gate_state, "");
-		property_get("twrp.nezha.goodix_gate_error", error, "");
-
-		if (second == 0 && strcmp(gate_state, "running") != 0) {
-			LOGINFO("nezha: Goodix gate was not running at password submit; starting it\n");
-			Kick_Nezha_Goodix_Gate(false);
-		} else if (error[0] != '\0' && restarts < 2) {
-			LOGINFO("nezha: Goodix gate reported '%s'; restarting before password check\n", error);
-			Kick_Nezha_Goodix_Gate(true);
-			restarts++;
-		} else if (second > 15 && strcmp(gate_state, "running") != 0 && restarts < 2) {
-			LOGINFO("nezha: Goodix gate exited before ready; restarting before password check\n");
-			Kick_Nezha_Goodix_Gate(true);
-			restarts++;
-		}
-
-		usleep(1000000);
-	}
-
-	char error[PROPERTY_VALUE_MAX];
-	property_get("twrp.nezha.goodix_gate_error", error, "");
-	LOGERR("nezha: Goodix Weaver did not become ready; gate error: %s\n", error);
-	gui_err("nezha_goodix_not_ready=Goodix Weaver is not ready; password verification was not attempted.");
+	gui_err("recovery_hook_failed=The device security service is not ready; password verification was not attempted.");
 	return false;
 }
 
-static bool Restart_Nezha_Goodix_Gate_And_Wait() {
-	if (!Nezha_Goodix_Gate_Present())
-		return true;
+static bool Run_Decrypt_Retry_Hook() {
+	static constexpr const char* hook = "/system/bin/twrp-decrypt-retry.sh";
+	if (!TWFunc::Path_Exists(hook))
+		return false;
 
-	LOGINFO("nezha: restarting Goodix Weaver gate before retrying FBE credential verification\n");
-	Kick_Nezha_Goodix_Gate(true);
-	return Wait_For_Nezha_Weaver_Ready();
+	gui_msg("recovery_hook_retry=Restarting the device security service before retrying decryption...");
+	return TWFunc::Exec_Cmd(hook, false) == 0;
+}
+
+static std::string Normalize_Slot_Suffix(std::string slot) {
+	slot = android::base::Trim(slot);
+	if (slot.size() >= 2 && slot.front() == '"' && slot.back() == '"')
+		slot = slot.substr(1, slot.size() - 2);
+	if (slot == "a" || slot == "_a")
+		return "_a";
+	if (slot == "b" || slot == "_b")
+		return "_b";
+	return "";
+}
+
+static std::string Read_Kernel_Argument(const std::string& contents, const std::string& key) {
+	size_t pos = contents.find(key);
+	if (pos == std::string::npos)
+		return "";
+
+	pos += key.size();
+	while (pos < contents.size() && isspace(contents[pos]))
+		pos++;
+	if (pos >= contents.size() || contents[pos] != '=')
+		return "";
+	pos++;
+	while (pos < contents.size() && isspace(contents[pos]))
+		pos++;
+
+	bool quoted = pos < contents.size() && contents[pos] == '"';
+	if (quoted)
+		pos++;
+	size_t end = pos;
+	while (end < contents.size()) {
+		if ((quoted && contents[end] == '"') || (!quoted && isspace(contents[end])))
+			break;
+		end++;
+	}
+	return contents.substr(pos, end - pos);
+}
+
+static std::string Resolve_Active_Slot_Suffix() {
+	std::string slot = Normalize_Slot_Suffix(android::base::GetProperty("ro.boot.slot_suffix", ""));
+	if (slot.empty())
+		slot = Normalize_Slot_Suffix(android::base::GetProperty("ro.boot.slot", ""));
+
+	for (const char* path : {"/proc/bootconfig", "/proc/cmdline"}) {
+		if (!slot.empty())
+			break;
+		std::string contents;
+		if (!android::base::ReadFileToString(path, &contents))
+			continue;
+		slot = Normalize_Slot_Suffix(Read_Kernel_Argument(contents, "androidboot.slot_suffix"));
+		if (slot.empty())
+			slot = Normalize_Slot_Suffix(Read_Kernel_Argument(contents, "androidboot.slot"));
+	}
+
+	if (!slot.empty()) {
+		std::string bare_slot = slot.substr(1);
+		TWFunc::Property_Override("ro.boot.slot_suffix", slot);
+		TWFunc::Property_Override("ro.boot.slot", bare_slot);
+		property_set("twrp.boot.slot_suffix", slot.c_str());
+		LOGINFO("Resolved active slot suffix as '%s'\n", slot.c_str());
+	}
+	return slot;
 }
 
 TWPartitionManager::TWPartitionManager(void) {
@@ -261,15 +282,14 @@ TWPartitionManager::TWPartitionManager(void) {
 	uevent_pfd.fd = -1;
 	stop_backup.set_value(0);
 #ifdef AB_OTA_UPDATER
-	char slot_suffix[PROPERTY_VALUE_MAX];
-	property_get("ro.boot.slot_suffix", slot_suffix, "error");
-	if (strcmp(slot_suffix, "error") == 0)
-		property_get("ro.boot.slot", slot_suffix, "error");
+	std::string slot_suffix = Resolve_Active_Slot_Suffix();
 	Active_Slot_Display = "";
-	if (strcmp(slot_suffix, "_a") == 0 || strcmp(slot_suffix, "a") == 0)
+	if (slot_suffix == "_a")
 		Set_Active_Slot("A");
-	else
+	else if (slot_suffix == "_b")
 		Set_Active_Slot("B");
+	else
+		LOGERR("Unable to determine the active slot from properties or kernel boot arguments\n");
 #endif
 }
 
@@ -283,8 +303,13 @@ void TWPartitionManager::Set_Crypto_State() {
 int TWPartitionManager::Set_Crypto_Type(const char* crypto_type) {
 	char type_prop[PROPERTY_VALUE_MAX];
 	property_get("ro.crypto.type", type_prop, "error");
-	if (strcmp(type_prop, "error") == 0)
-		property_set("ro.crypto.type", crypto_type);
+	if (strcmp(type_prop, crypto_type) != 0) {
+		if (TWFunc::Property_Override("ro.crypto.type", crypto_type) == NOT_AVAILABLE) {
+			property_set("ro.crypto.type", crypto_type);
+		}
+		property_get("ro.crypto.type", type_prop, "error");
+		LOGINFO("FBE type override: requested=%s effective=%s\n", crypto_type, type_prop);
+	}
 	// Sleep for a bit so that services can start if needed
 	sleep(1);
 	return 0;
@@ -397,8 +422,19 @@ static inline std::string KM_Ver_From_Manifest(std::string ver) {
 	TWFunc::Get_Service_From_Manifest("/vendor", "android.hardware.keymaster", ver);
 	if (strstr(ver.c_str(), "4")) {
 		ver = "4.x";
+	} else if (ver.empty()) {
+		TWFunc::Get_Service_From_Manifest("/vendor", "android.hardware.security.keymint", ver);
+		if (!ver.empty()) {
+			LOGINFO("Keymaster_Ver::Found AIDL KeyMint version '%s'; using keymaster 4.x compatibility path\n", ver.c_str());
+			ver = "4.x";
+		}
 	}
 	return ver;
+}
+
+static inline bool Keep_Runtime_Partitions() {
+	return android::base::GetBoolProperty(
+		"twrp.recovery.keep_runtime_partitions", false);
 }
 
 void inline Process_Keymaster_Version(TWPartition *ven, bool Display_Error) {
@@ -412,7 +448,7 @@ void inline Process_Keymaster_Version(TWPartition *ven, bool Display_Error) {
 		*/
 	if (version.empty()) {
 		// unmount partition(s)
-		if (ven) ven->UnMount(Display_Error);
+		if (ven && !Keep_Runtime_Partitions()) ven->UnMount(Display_Error);
 
 		// Use keymaster_ver prop set from device tree (if exists)
 		version = android::base::GetProperty(TW_KEYMASTER_VERSION_PROP, version);
@@ -423,10 +459,10 @@ void inline Process_Keymaster_Version(TWPartition *ven, bool Display_Error) {
 			LOGINFO("Keymaster_Ver::Unable to find vendor manifest on the device. Setting to default value.\n");
 		}
 	} else {
-		if (ven) ven->UnMount(Display_Error);
+		if (ven && !Keep_Runtime_Partitions()) ven->UnMount(Display_Error);
 	}
 #else
-	if (ven) ven->UnMount(Display_Error);
+	if (ven && !Keep_Runtime_Partitions()) ven->UnMount(Display_Error);
 
 	version = android::base::GetProperty(TW_KEYMASTER_VERSION_PROP, version);
 	if (version.empty()) {
@@ -435,6 +471,10 @@ void inline Process_Keymaster_Version(TWPartition *ven, bool Display_Error) {
 		LOGINFO("Keymaster_Ver::Force Keymaster_Ver flag found.\n");
 	}
 #endif
+	if (version.empty() && android::base::GetProperty("ro.boot.keymaster", "") == "1") {
+		LOGINFO("Keymaster_Ver::ro.boot.keymaster=1 and no manifest version found; using keymaster 4.x compatibility path\n");
+		version = "4.x";
+	}
 	LOGINFO("Keymaster_Ver::Using keymaster version '%s' for decryption\n", version.c_str());
 	android::base::SetProperty(TW_KEYMASTER_VERSION_PROP, version.c_str());
 }
@@ -612,10 +652,22 @@ clear:
 	}
 #endif
 
-	if (odm) odm->UnMount(Display_Error);
+	if (odm) {
+		if (Keep_Runtime_Partitions()) {
+			LOGINFO("Keeping /odm mounted for recovery HAL stability\n");
+		} else {
+			odm->UnMount(Display_Error);
+		}
+	}
 	if (recovery_mode)
 		Process_Keymaster_Version(ven, false);
-	if (ven) ven->UnMount(Display_Error);
+	if (ven) {
+		if (Keep_Runtime_Partitions()) {
+			LOGINFO("Keeping /vendor mounted for active recovery HAL dependencies\n");
+		} else {
+			ven->UnMount(Display_Error);
+		}
+	}
 	return true;
 }
 
@@ -766,7 +818,21 @@ int TWPartitionManager::Write_Fstab(void) {
 void TWPartitionManager::Decrypt_Data() {
 	#ifdef TW_INCLUDE_CRYPTO
 	TWPartition* Decrypt_Data = Find_Partition_By_Path("/data");
-	if (Decrypt_Data && Decrypt_Data->Is_Encrypted && !Decrypt_Data->Is_Decrypted) {
+	bool force_metadata_setup = false;
+	if (Decrypt_Data && !Decrypt_Data->Key_Directory.empty() &&
+			DataManager::GetIntValue(TW_IS_FBE) &&
+			(Decrypt_Data->Decrypted_Block_Device.empty() || !Decrypt_Data->Is_Mounted())) {
+		force_metadata_setup = true;
+	}
+	if (Decrypt_Data && ((Decrypt_Data->Is_Encrypted && !Decrypt_Data->Is_Decrypted) || force_metadata_setup)) {
+		if (force_metadata_setup) {
+			LOGINFO("Forcing metadata decrypt setup for FBE /data: encrypted=%d decrypted=%d block='%s'\n",
+				Decrypt_Data->Is_Encrypted ? 1 : 0, Decrypt_Data->Is_Decrypted ? 1 : 0,
+				Decrypt_Data->Decrypted_Block_Device.c_str());
+			Decrypt_Data->Is_Encrypted = true;
+			Decrypt_Data->Is_Decrypted = false;
+			Decrypt_Data->Decrypted_Block_Device.clear();
+		}
 		Set_Crypto_State();
 		TWPartition* Key_Directory_Partition = Find_Partition_By_Path(Decrypt_Data->Key_Directory);
 		if (Key_Directory_Partition != nullptr)
@@ -774,36 +840,93 @@ void TWPartitionManager::Decrypt_Data() {
 				Mount_By_Path(Decrypt_Data->Key_Directory, false);
 		if (!Decrypt_Data->Key_Directory.empty()) {
 			Set_Crypto_Type("file");
+			LOGINFO("Metadata decrypt setup: block='%s', mount='%s', fs='%s', key_dir='%s'\n",
+				Decrypt_Data->Actual_Block_Device.c_str(), Decrypt_Data->Mount_Point.c_str(),
+				Decrypt_Data->Current_File_System.c_str(), Decrypt_Data->Key_Directory.c_str());
 #ifdef TW_INCLUDE_FBE_METADATA_DECRYPT
 #ifdef USE_FSCRYPT
 			std::vector<std::string> user_devices;
 			std::vector<bool> device_aliased;
-			if (android::vold::fscrypt_mount_metadata_encrypted(Decrypt_Data->Actual_Block_Device, Decrypt_Data->Mount_Point, false, false, Decrypt_Data->Current_File_System, false, user_devices, device_aliased, 0, TWFunc::Path_Exists(additional_fstab) ? additional_fstab : "")) {
+			auto cleanup_metadata_attempt = [&]() {
+				Decrypt_Data->UnMount(false);
+				TWFunc::Exec_Cmd("dmsetup remove userdata", false);
+				Decrypt_Data->Is_Decrypted = false;
+				Decrypt_Data->Decrypted_Block_Device.clear();
+			};
+			auto try_metadata_environment = [&]() -> bool {
+				if (!android::vold::fscrypt_mount_metadata_encrypted(
+						Decrypt_Data->Actual_Block_Device, Decrypt_Data->Mount_Point,
+						false, false, Decrypt_Data->Current_File_System, false,
+						user_devices, device_aliased, 0,
+						TWFunc::Path_Exists(additional_fstab) ? additional_fstab : "")) {
+					LOGINFO("Unable to decrypt metadata encryption in current KeyMint environment\n");
+					cleanup_metadata_attempt();
+					return false;
+				}
 				std::string crypto_blkdev = android::base::GetProperty("ro.crypto.fs_crypto_blkdev", "error");
 				Decrypt_Data->Decrypted_Block_Device = crypto_blkdev;
 				LOGINFO("Successfully decrypted metadata encrypted data partition with new block device: '%s'\n", crypto_blkdev.c_str());
-#endif
 				Decrypt_Data->Is_Decrypted = true; // Needed to make the mount function work correctly
-				int retry_count = 10;
-				while (!Decrypt_Data->Mount(false) && --retry_count)
+				bool mounted = false;
+				for (int retry_count = 0; retry_count < 10 && !mounted; ++retry_count) {
+					mounted = Decrypt_Data->Mount(false);
+					if (mounted)
+						break;
 					usleep(500);
-				if (Decrypt_Data->Mount(false)) {
+				}
+				if (mounted) {
 					if (!Decrypt_Data->Decrypt_FBE_DE()) {
 						LOGERR("Unable to decrypt FBE device\n");
 					}
-
+					return true;
 				} else {
-					LOGINFO("Failed to mount data after metadata decrypt\n");
+					LOGINFO("Failed to mount data after metadata decrypt in current KeyMint environment\n");
+					cleanup_metadata_attempt();
+					return false;
 				}
-			} else {
-				LOGINFO("Unable to decrypt metadata encryption\n");
+			};
+
+			std::string metadata_environment =
+				android::base::GetProperty("twrp.keymint.metadata_env", "recovery");
+			bool metadata_ready = try_metadata_environment();
+			const bool allow_stock_retry = android::base::GetBoolProperty(
+				"twrp.keymint.allow_stock_retry", false);
+			const bool has_environment_hook =
+				android::keystore::setRecoveryKeyMintEnvironment != nullptr;
+			if (!metadata_ready && metadata_environment != "stock" &&
+					allow_stock_retry && has_environment_hook) {
+				LOGINFO("Metadata decrypt failed in the recovery KeyMint environment; "
+					"retrying with device stock values\n");
+				if (!Mount_By_Path("/system_root", false))
+					LOGINFO("Metadata compatibility: unable to mount /system_root; "
+						"stock property discovery will use fallbacks\n");
+				Mount_By_Path("/vendor", false);
+				if (android::keystore::setRecoveryKeyMintEnvironment(true)) {
+					metadata_environment = "stock";
+					metadata_ready = try_metadata_environment();
+				}
+			} else if (!metadata_ready && allow_stock_retry && !has_environment_hook) {
+				LOGINFO("Metadata stock retry was requested, but no device KeyMint hook is available\n");
 			}
+			if (metadata_ready) {
+				android::base::SetProperty("twrp.keymint.metadata_env", metadata_environment);
+				LOGINFO("Metadata decrypt selected KeyMint environment: %s\n",
+					metadata_environment.c_str());
+			} else if (metadata_environment == "stock" && has_environment_hook) {
+				LOGINFO("Metadata retry with stock values failed; restoring recovery values\n");
+				android::keystore::setRecoveryKeyMintEnvironment(false);
+				android::base::SetProperty("twrp.keymint.metadata_env", "recovery");
+			}
+#endif
 #else
 			LOGERR("Metadata FBE decrypt support not present in this TWRP\n");
 #endif
 		}
 		if (Decrypt_Data->Is_FBE) {
-			if (DataManager::GetIntValue(TW_CRYPTO_PWTYPE) == 0) {
+			if (!Decrypt_Data->Is_Mounted()) {
+				LOGINFO("Skipping automatic default-password FBE decrypt because "
+					"/data metadata mapping is not ready\n");
+			} else if (DataManager::GetIntValue(TW_CRYPTO_PWTYPE) == 0) {
 				if (Decrypt_Device("!") == 0) {
 					gui_msg("decrypt_success=Successfully decrypted with default password.");
 					DataManager::SetValue(TW_IS_ENCRYPTED, 0);
@@ -830,7 +953,7 @@ void TWPartitionManager::Decrypt_Data() {
 //			}
 		}
 	}
-	if (Decrypt_Data && (!Decrypt_Data->Is_Encrypted || Decrypt_Data->Is_Decrypted)) {
+	if (Decrypt_Data && (!Decrypt_Data->Is_Encrypted || Decrypt_Data->Is_Decrypted) && Decrypt_Data->Is_Mounted()) {
 		Decrypt_Adopted();
 	}
 #endif
@@ -1930,12 +2053,13 @@ int TWPartitionManager::Format_Data(void) {
 			twrpApex apex;
 			apex.Unmount();
 #endif
-			if (metadata != NULL)
-				metadata->Mount(true);
-			if (!Check_Pending_Merges())
-				return false;
-		}
-		ret = dat->Wipe_Encryption();
+				if (metadata != NULL)
+					metadata->Mount(true);
+				if (!Check_Pending_Merges()) {
+					LOGINFO("Unable to complete/check virtual A/B merge state before formatting data; continuing with data format.\n");
+				}
+			}
+			ret = dat->Wipe_Encryption();
 		if (ret)
 			TWFunc::check_and_run_script("/system/bin/formatdata.sh", "Format Data Script");
 		return ret;
@@ -2098,7 +2222,18 @@ void TWPartitionManager::Update_System_Details(void) {
 	if (FreeStorage != NULL) {
 		// Attempt to mount storage
 		if (!FreeStorage->Mount(false)) {
-			gui_msg(Msg(msg::kWarning, "unable_to_mount_storage=Unable to mount storage"));
+			const bool expected_locked_data =
+				FreeStorage->Mount_Point == "/data" &&
+				(!FreeStorage->Key_Directory.empty() ||
+				 !android::base::GetProperty("metadata.contents", "").empty() ||
+				 android::base::GetBoolProperty("ro.crypto.metadata.enabled", false)) &&
+				!android::base::GetBoolProperty("twrp.decrypt.done", false);
+			if (expected_locked_data) {
+				LOGINFO("Internal storage is locked until metadata/FBE decryption; "
+				        "suppressing expected storage warning\n");
+			} else {
+				gui_msg(Msg(msg::kWarning, "unable_to_mount_storage=Unable to mount storage"));
+			}
 			DataManager::SetValue(TW_STORAGE_FREE_SIZE, 0);
 		} else {
 			DataManager::SetValue(TW_STORAGE_FREE_SIZE, (int)(FreeStorage->Free / 1048576LLU));
@@ -2137,31 +2272,112 @@ void TWPartitionManager::Post_Decrypt(const string& Block_Device) {
 		dat->Setup_File_System(false);
 		dat->Current_File_System = dat->Fstab_File_System;  // Needed if we're ignoring blkid because encrypted devices start out as emmc
 
-		sleep(1); // Sleep for a bit so that the device will be ready
+		if (!android::base::GetBoolProperty(
+				"twrp.recovery.post_decrypt_media_bind", false)) {
+			sleep(1);
+			dat->Symlink_Path.clear();
+			if (!dat->Mount(false))
+				LOGERR("Unable to mount /data after decryption");
 
-		// Mount only /data
-		dat->Symlink_Path = ""; // Not to let it to bind mount /data/media again
+			if (dat->Has_Data_Media && TWFunc::Path_Exists("/data/media/0"))
+				dat->Storage_Path = "/data/media/0";
+			else
+				dat->Storage_Path = "/data/media";
+
+			dat->Symlink_Path = dat->Storage_Path;
+			DataManager::SetValue("tw_storage_path", dat->Symlink_Path);
+			DataManager::SetValue("tw_settings_path", TW_STORAGE_PATH);
+			LOGINFO("New storage path after decryption: %s\n", dat->Storage_Path.c_str());
+
+			DataManager::LoadTWRPFolderInfo();
+			Update_System_Details();
+			Output_Partition(dat);
+			if (!android::base::StartsWith(dat->Actual_Block_Device, "/dev/block/mmcblk") &&
+					!dat->Bind_Mount(false))
+				LOGERR("Unable to bind mount /sdcard to %s\n", dat->Storage_Path.c_str());
+			return;
+		}
+
+		// The opt-in media path uses a short settling interval instead of
+		// blocking the decrypt UI for one second.
+		usleep(100000);
+
+		// Mount only /data. Binding is done below after the CE media path appears.
+		std::string saved_symlink_path = dat->Symlink_Path;
+		dat->Symlink_Path.clear();
 		if (!dat->Mount(false)) {
 			LOGERR("Unable to mount /data after decryption");
 		}
 
-		if (dat->Has_Data_Media && TWFunc::Path_Exists("/data/media/0")) {
-			dat->Storage_Path = "/data/media/0";
-		} else {
-			dat->Storage_Path = "/data/media";
+		// Wait for CE media and initialize a real bind target.
+		// Do not create /data/media here: a synthetic directory can hide an FBE failure.
+		for (int retry = 0; retry < 50 &&
+			 !TWFunc::Path_Exists("/data/media/0"); ++retry) {
+			usleep(100000);
 		}
-		dat->Symlink_Path = dat->Storage_Path;
-		DataManager::SetValue("tw_storage_path", dat->Symlink_Path);
-		DataManager::SetValue("tw_settings_path", TW_STORAGE_PATH);
-		LOGINFO("New storage path after decryption: %s\n", dat->Storage_Path.c_str());
 
-		DataManager::LoadTWRPFolderInfo();
-		Update_System_Details();
-		Output_Partition(dat);
-		if (!android::base::StartsWith(dat->Actual_Block_Device, "/dev/block/mmcblk")) {
-			if (!dat->Bind_Mount(false))
-				LOGERR("Unable to bind mount /sdcard to %s\n", dat->Storage_Path.c_str());
+		if (TWFunc::Path_Exists("/data/media/0")) {
+			dat->Storage_Path = "/data/media/0";
+		} else if (TWFunc::Path_Exists("/data/media")) {
+			dat->Storage_Path = "/data/media";
+			LOGINFO("User media/0 is unavailable; using /data/media temporarily\n");
+		} else {
+			dat->Symlink_Path = saved_symlink_path;
+			LOGERR("FBE reported success but neither /data/media/0 nor /data/media exists\n");
+			Update_System_Details();
+			Output_Partition(dat);
+			return;
 		}
+
+		if (dat->Symlink_Mount_Point.empty()) {
+			dat->Symlink_Mount_Point = "/sdcard";
+			mkdir(dat->Symlink_Mount_Point.c_str(), 0770);
+			LOGINFO("Initialized empty media bind target as %s\n",
+				dat->Symlink_Mount_Point.c_str());
+		}
+
+		dat->Symlink_Path = dat->Storage_Path;
+		dat->Has_Data_Media = true;
+		dat->Is_Storage = true;
+		if (dat->Storage_Name.empty() || dat->Storage_Name == "Data")
+			dat->Storage_Name = "Internal Storage";
+		if (dat->MTP_Storage_ID == 0) {
+			dat->MTP_Storage_ID = (1U << 16) + 1;
+			LOGINFO("Assigned internal-storage MTP ID %u after decryption\n",
+				dat->MTP_Storage_ID);
+		}
+		DataManager::SetValue("tw_storage_path", dat->Storage_Path);
+		DataManager::SetValue("tw_settings_path", TW_STORAGE_PATH);
+		LOGINFO("Media path after decryption: %s -> %s\n",
+			dat->Symlink_Path.c_str(), dat->Symlink_Mount_Point.c_str());
+
+		umount2(dat->Symlink_Mount_Point.c_str(), MNT_DETACH);
+		if (!dat->Bind_Mount(false)) {
+			LOGERR("Unable to bind mount %s to %s\n",
+				dat->Symlink_Path.c_str(), dat->Symlink_Mount_Point.c_str());
+		}
+
+		// Refresh capacity through statfs only. A complete Update_System_Details
+		// recursively walks all of /data to calculate backup size and can block
+		// the GUI for tens of seconds immediately after FBE succeeds. The normal
+		// backup workflow still performs the full calculation when it is needed.
+		DataManager::LoadTWRPFolderInfo();
+		dat->Update_Size(false, false);
+		Output_Partition(dat);
+
+#ifdef TW_HAS_MTP
+		// The host may have enumerated MTP while /data was still locked and
+		// cached an empty storage object.  Publish the now-valid data-media
+		// storage only when MTP was already running; never enable MTP merely as
+		// a side effect of pressing Decrypt.
+		if (mtppid) {
+			LOGINFO("Publishing decrypted user 0 media to active MTP\n");
+			Remove_MTP_Storage(dat->MTP_Storage_ID);
+			usleep(100000);
+			if (!Add_MTP_Storage(dat->MTP_Storage_ID))
+				LOGERR("Unable to publish decrypted media to active MTP\n");
+		}
+#endif
 	} else
 		LOGERR("Unable to locate data partition.\n");
 }
@@ -2281,44 +2497,65 @@ int TWPartitionManager::Decrypt_Device(string Password, int user_id) {
 	property_set("twrp.mount_to_decrypt", "1");
 
 	Set_Crypto_State();
-	Set_Crypto_Type("block");
+	// Select the vold encryption mode before any user-key operation.
+	if (DataManager::GetIntValue(TW_IS_FBE))
+		Set_Crypto_Type("file");
+	else
+		Set_Crypto_Type("block");
 
 	if (DataManager::GetIntValue(TW_IS_FBE)) {
 #ifdef TW_INCLUDE_FBE
-		if (!Mount_By_Path("/data", true)) // /data has to be mounted for FBE
-			return -1;
-
-		bool user_need_decrypt = false;
-		std::vector<users_struct>::iterator iter;
-		for (iter = Users_List.begin(); iter != Users_List.end(); iter++) {
-			if (atoi((*iter).userId.c_str()) == user_id && !(*iter).isDecrypted) {
-				user_need_decrypt = true;
+		if (!Mount_By_Path("/data", true)) { // /data has to be mounted for FBE
+			LOGINFO("FBE user decrypt: /data is not mounted; attempting metadata decrypt setup before retry\n");
+			Decrypt_Data();
+			if (!Mount_By_Path("/data", true)) {
+				LOGERR("FBE user decrypt: unable to mount /data after metadata decrypt setup\n");
+				return -1;
 			}
 		}
-		if (!user_need_decrypt) {
-			LOGINFO("User %d does not require decryption\n", user_id);
-			return 0;
-		}
+
+		bool user_need_decrypt = false;
+		bool user_found = false;
+		std::vector<users_struct>::iterator iter;
+			for (iter = Users_List.begin(); iter != Users_List.end(); iter++) {
+				if (atoi((*iter).userId.c_str()) == user_id && !(*iter).isDecrypted) {
+					user_need_decrypt = true;
+				}
+				if (atoi((*iter).userId.c_str()) == user_id) {
+					user_found = true;
+				}
+			}
+			if (user_id == 0 && (!user_found || !TWFunc::Path_Exists("/data/media/0"))) {
+				LOGINFO("FBE user 0 CE storage is not available at /data/media/0; forcing credential decrypt (user_found=%d)\n",
+					user_found ? 1 : 0);
+				user_need_decrypt = true;
+			}
+			LOGINFO("FBE decrypt request: user=%d, password_len=%zu, tw_crypto_pwtype=%d, users_need_decrypt=%d\n",
+				user_id, Password.size(), DataManager::GetIntValue(TW_CRYPTO_PWTYPE), user_need_decrypt ? 1 : 0);
+			if (!user_need_decrypt) {
+				LOGINFO("User %d does not require decryption\n", user_id);
+				return 0;
+			}
 
 		int retry_count = 10;
-			while (!TWFunc::Path_Exists("/data/system/users/gatekeeper.password.key") && --retry_count)
-				usleep(2000); // A small sleep is needed after mounting /data to ensure reliable decrypt...maybe because of DE?
-			gui_msg(Msg("decrypting_user_fbe=Attempting to decrypt FBE for user {1}...")(user_id));
-			if (!Wait_For_Nezha_Weaver_Ready())
-				return -1;
-			if (android::keystore::Decrypt_User(user_id, Password)) {
-			gui_msg(Msg("decrypt_user_success_fbe=User {1} Decrypted Successfully")(user_id));
-			Mark_User_Decrypted(user_id);
+				while (!TWFunc::Path_Exists("/data/system/users/gatekeeper.password.key") && --retry_count)
+					usleep(2000); // A small sleep is needed after mounting /data to ensure reliable decrypt...maybe because of DE?
+				gui_msg(Msg("decrypting_user_fbe=Attempting to decrypt FBE for user {1}...")(user_id));
+				if (!Run_Pre_Decrypt_Hook())
+					return -1;
+				LOGINFO("Calling android::keystore::Decrypt_User for user %d\n", user_id);
+				if (android::keystore::Decrypt_User(user_id, Password)) {
+				gui_msg(Msg("decrypt_user_success_fbe=User {1} Decrypted Successfully")(user_id));
+				Mark_User_Decrypted(user_id);
 			if (user_id == 0) {
 				Post_Decrypt("");
 			}
 
 			return 0;
 		} else {
-			if (TWFunc::Path_Exists("/system/bin/nezha-goodix-gate.sh")) {
-				LOGINFO("nezha: first FBE credential verification failed; retrying after Goodix gate restart\n");
-				gui_msg("nezha_goodix_retry=Goodix Weaver was not stable; retrying decryption...");
-				if (Restart_Nezha_Goodix_Gate_And_Wait() && android::keystore::Decrypt_User(user_id, Password)) {
+			if (TWFunc::Path_Exists("/system/bin/twrp-decrypt-retry.sh")) {
+				LOGINFO("Credential verification failed; running the device retry hook\n");
+				if (Run_Decrypt_Retry_Hook() && android::keystore::Decrypt_User(user_id, Password)) {
 					gui_msg(Msg("decrypt_user_success_fbe=User {1} Decrypted Successfully")(user_id));
 					Mark_User_Decrypted(user_id);
 					if (user_id == 0) {
@@ -2935,6 +3172,11 @@ TWPartition *TWPartitionManager::Get_Default_Storage_Partition()
 }
 
 bool TWPartitionManager::Enable_MTP(void) {
+	if (Is_Usb_Host_Active()) {
+		LOGINFO("MTP: USB host mode active; deferring gadget configuration\n");
+		return true;
+	}
+
 #ifdef TW_HAS_MTP
 	if (mtppid) {
 		gui_err("mtp_already_enabled=MTP already enabled");
@@ -2972,79 +3214,79 @@ bool TWPartitionManager::Enable_MTP(void) {
 					break;
 				usleep(100000);
 			}
-				if (strcmp(mtp_ready, "1") != 0) {
-					std::string ffs_ready;
-					if (android::base::ReadFileToString("/config/usb_gadget/g1/functions/ffs.mtp/ready", &ffs_ready) &&
-					    android::base::Trim(ffs_ready) == "1") {
-						LOGINFO("MTP FFS ready file is set; syncing sys.usb.ffs.mtp.ready\n");
+			if (strcmp(mtp_ready, "1") != 0) {
+				std::string ffs_ready;
+				if (android::base::ReadFileToString("/config/usb_gadget/g1/functions/ffs.mtp/ready", &ffs_ready) &&
+				    android::base::Trim(ffs_ready) == "1") {
+					LOGINFO("MTP FFS ready file is set; syncing sys.usb.ffs.mtp.ready\n");
 					property_set("sys.usb.ffs.mtp.ready", "1");
 				} else {
-						LOGINFO("MTP FFS did not report ready before USB config switch\n");
-					}
+					LOGINFO("MTP FFS did not report ready before USB config switch\n");
 				}
-				property_get("sys.usb.ffs.mtp.ready", mtp_ready, "0");
-				if (strcmp(mtp_ready, "1") != 0) {
-					LOGERR("MTP: refusing composite switch because MTP FunctionFS is not ready\n");
+			}
+			property_get("sys.usb.ffs.mtp.ready", mtp_ready, "0");
+			if (strcmp(mtp_ready, "1") != 0) {
+				LOGERR("MTP: refusing composite switch because MTP FunctionFS is not ready\n");
+				Disable_MTP();
+				return false;
+			}
+			char controller[PROPERTY_VALUE_MAX];
+			property_get("sys.usb.controller", controller, "a600000.dwc3");
+			std::string vendor;
+			std::string product;
+			Get_Mtp_Adb_Usb_Ids(&vendor, &product);
+			std::string functions =
+				"ln -s /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1; "
+				"ln -s /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2; ";
+			std::string cmd =
+				"sh -c '"
+				"setprop sys.usb.config twrp_mtp_adb; "
+				"echo none > /config/usb_gadget/g1/UDC 2>/dev/null || true; "
+				"rm -f /config/usb_gadget/g1/configs/b.1/function0 "
+				"/config/usb_gadget/g1/configs/b.1/function1 "
+				"/config/usb_gadget/g1/configs/b.1/f1 "
+				"/config/usb_gadget/g1/configs/b.1/f2 "
+				"/config/usb_gadget/g1/configs/b.1/f3; "
+				"echo mtp_adb > /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration; "
+				"echo " + vendor + " > /config/usb_gadget/g1/idVendor; "
+				"echo " + product + " > /config/usb_gadget/g1/idProduct; "
+				+ functions +
+				"echo " + std::string(controller) + " > /config/usb_gadget/g1/UDC; "
+				"setprop sys.usb.state mtp,adb; "
+				"setprop twrp.usb.mtp_configured 1"
+				"'";
+			LOGINFO("MTP: switching configfs to mtp+adb composite %s:%s on %s (%s)\n",
+				vendor.c_str(), product.c_str(), controller,
+				"mtp=f1,adb=f2");
+			if (TWFunc::Exec_Cmd(cmd, false) != 0) {
+				LOGERR("MTP: failed to bind mtp+adb composite configfs; restoring adb-only mode\n");
+				Disable_MTP();
+				return false;
+			}
+			usleep(500000);
+			std::string udc;
+			if (!android::base::ReadFileToString("/config/usb_gadget/g1/UDC", &udc) ||
+				android::base::Trim(udc).empty() || android::base::Trim(udc) == "none") {
+				LOGINFO("MTP: first composite bind dropped; retrying UDC bind after controller settles\n");
+				usleep(2500000);
+				std::string retry_cmd = "sh -c 'echo " + std::string(controller) +
+					" > /config/usb_gadget/g1/UDC'";
+				if (TWFunc::Exec_Cmd(retry_cmd, false) != 0) {
+					LOGERR("MTP: delayed composite UDC bind failed; restoring adb-only mode\n");
 					Disable_MTP();
 					return false;
 				}
-					char controller[PROPERTY_VALUE_MAX];
-					property_get("sys.usb.controller", controller, "a600000.dwc3");
-					std::string vendor;
-					std::string product;
-					Get_Mtp_Adb_Usb_Ids(&vendor, &product);
-					std::string functions =
-						"ln -s /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1; "
-						"ln -s /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2; ";
-					std::string cmd =
-						"sh -c '"
-						"setprop sys.usb.config twrp_mtp_adb; "
-						"echo none > /config/usb_gadget/g1/UDC 2>/dev/null || true; "
-						"rm -f /config/usb_gadget/g1/configs/b.1/function0 "
-						"/config/usb_gadget/g1/configs/b.1/function1 "
-						"/config/usb_gadget/g1/configs/b.1/f1 "
-						"/config/usb_gadget/g1/configs/b.1/f2 "
-						"/config/usb_gadget/g1/configs/b.1/f3; "
-						"echo mtp_adb > /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration; "
-						"echo " + vendor + " > /config/usb_gadget/g1/idVendor; "
-						"echo " + product + " > /config/usb_gadget/g1/idProduct; "
-						+ functions +
-						"echo " + std::string(controller) + " > /config/usb_gadget/g1/UDC; "
-						"setprop sys.usb.state mtp,adb; "
-						"setprop twrp.usb.mtp_configured 1"
-						"'";
-					LOGINFO("MTP: switching configfs to mtp+adb composite %s:%s on %s (%s)\n",
-						vendor.c_str(), product.c_str(), controller,
-						"mtp=f1,adb=f2");
-					if (TWFunc::Exec_Cmd(cmd, false) != 0) {
-						LOGERR("MTP: failed to bind mtp+adb composite configfs; restoring adb-only mode\n");
-						Disable_MTP();
-						return false;
-					}
-					usleep(500000);
-					std::string udc;
-					if (!android::base::ReadFileToString("/config/usb_gadget/g1/UDC", &udc) ||
-						android::base::Trim(udc).empty() || android::base::Trim(udc) == "none") {
-						LOGINFO("MTP: first composite bind dropped; retrying UDC bind after controller settles\n");
-						usleep(2500000);
-						std::string retry_cmd = "sh -c 'echo " + std::string(controller) +
-							" > /config/usb_gadget/g1/UDC'";
-						if (TWFunc::Exec_Cmd(retry_cmd, false) != 0) {
-							LOGERR("MTP: delayed composite UDC bind failed; restoring adb-only mode\n");
-							Disable_MTP();
-							return false;
-						}
-						usleep(500000);
-						if (!android::base::ReadFileToString("/config/usb_gadget/g1/UDC", &udc) ||
-							android::base::Trim(udc).empty() || android::base::Trim(udc) == "none") {
-							LOGERR("MTP: delayed composite UDC bind did not persist; restoring adb-only mode\n");
-							Disable_MTP();
-							return false;
-						}
-						LOGINFO("MTP: delayed composite UDC bind succeeded on %s\n", controller);
-					}
+				usleep(500000);
+				if (!android::base::ReadFileToString("/config/usb_gadget/g1/UDC", &udc) ||
+					android::base::Trim(udc).empty() || android::base::Trim(udc) == "none") {
+					LOGERR("MTP: delayed composite UDC bind did not persist; restoring adb-only mode\n");
+					Disable_MTP();
+					return false;
 				}
-				return true;
+				LOGINFO("MTP: delayed composite UDC bind succeeded on %s\n", controller);
+			}
+		}
+		return true;
 		} else {
 		close(mtppipe[0]);
 		close(mtppipe[1]);
@@ -3075,6 +3317,11 @@ void TWPartitionManager::Add_All_MTP_Storage(void) {
 }
 
 bool TWPartitionManager::Disable_MTP(void) {
+	if (Is_Usb_Host_Active()) {
+		LOGINFO("MTP: USB host mode active; leaving gadget state untouched\n");
+		return true;
+	}
+
 	char old_value[PROPERTY_VALUE_MAX];
 	property_set("sys.usb.ffs.mtp.ready", "0");
 	property_set("twrp.usb.mtp_configured", "0");
@@ -3304,6 +3551,16 @@ bool TWPartitionManager::Flash_Image(string& path, string& filename) {
 		return false;
 	}
 
+	if (flash_part && flash_part->Get_Mount_Point() == "/super") {
+		gui_msg("unmapping_super_devices=Unmapping Super Devices...");
+		if (!Unmap_Super_Devices()) {
+			gui_err("super_unmap_failed=Unable to unmap dynamic partitions before flashing Super.");
+			return false;
+		}
+		Unlock_Block_Partitions();
+		sync();
+	}
+
 	DataManager::SetProgress(0.0);
 	if (flash_part) {
 		flash_part->Backup_FileName = filename;
@@ -3394,9 +3651,17 @@ void TWPartitionManager::Translate_Partition_Display_Names() {
 
 	std::vector<TWPartition*>::iterator sysfs;
 	for (sysfs = Partitions.begin(); sysfs != Partitions.end(); sysfs++) {
-		if (!(*sysfs)->Sysfs_Entry.empty()) {
+		if (!(*sysfs)->Sysfs_Entry.empty() &&
+		    ((*sysfs)->Display_Name.empty() || (*sysfs)->Display_Name == "Storage")) {
 			Translate_Partition((*sysfs)->Mount_Point.c_str(), "autostorage", "Storage", "autostorage", "Storage");
 		}
+	}
+
+	TWPartition* usb_otg = PartitionManager.Find_Partition_By_Path("/usb_otg");
+	if (usb_otg) {
+		usb_otg->Display_Name = "USB-OTG";
+		usb_otg->Storage_Name = "USB-OTG";
+		usb_otg->Backup_Display_Name = "USB-OTG";
 	}
 
 	// This updates the text on all of the storage selection buttons in the GUI
@@ -3532,16 +3797,16 @@ void TWPartitionManager::Override_Active_Slot(const string& Slot) {
 	PartitionManager.Update_System_Details();
 }
 
-void TWPartitionManager::Set_Active_Slot(const string& Slot) {
+void TWPartitionManager::Set_Active_Slot(const string& Slot, bool force) {
 	if (Slot != "A" && Slot != "B") {
 		LOGERR("Set_Active_Slot invalid slot '%s'\n", Slot.c_str());
 		return;
 	}
-	if (Active_Slot_Display == Slot)
+	if (!force && Active_Slot_Display == Slot)
 		return;
 	LOGINFO("Setting active slot %s\n", Slot.c_str());
 #ifdef AB_OTA_UPDATER
-	if (!Active_Slot_Display.empty()) {
+	if (!Active_Slot_Display.empty() || force) {
 		const auto module = BootControlClient::WaitForService();
 		if (module == nullptr) {
 			LOGERR("Error getting bootctrl module.\n");
@@ -3565,7 +3830,9 @@ void TWPartitionManager::Set_Active_Slot(const string& Slot) {
 string TWPartitionManager::Get_Active_Slot_Suffix() {
 	if (Active_Slot_Display == "A")
 		return "_a";
-	return "_b";
+	if (Active_Slot_Display == "B")
+		return "_b";
+	return "";
 }
 string TWPartitionManager::Get_Active_Slot_Display() {
 	return Active_Slot_Display;
@@ -3955,6 +4222,37 @@ bool TWPartitionManager::Unmap_Super_Devices() {
 	twrpApex apex;
 	apex.Unmount();
 #endif
+	// Force unmount all known sub-directory mounts that may block dynamic partition unmapping
+	const char* known_submounts[] = {
+		"/vendor/firmware_mnt",
+		"/vendor/dsp",
+		"/vendor/odm",
+		"/vendor/lib/modules",
+		"/vendor_dlkm/lib/modules",
+		"/system/lib/modules",
+		"/system_ext/lib/modules",
+		"/odm/lib/modules",
+		"/product/lib/modules",
+		nullptr
+	};
+	for (int i = 0; known_submounts[i] != nullptr; i++) {
+		if (umount2(known_submounts[i], MNT_DETACH) == 0) {
+			LOGINFO("Force unmounted sub-mount: %s\n", known_submounts[i]);
+		}
+	}
+	// Also force unmount any remaining mounts under /vendor and /vendor_dlkm
+	// Use MNT_DETACH on main mount points first, then shell command as fallback
+	const char* main_mounts[] = {
+		"/vendor", "/vendor_dlkm", "/system", "/system_ext",
+		"/product", "/odm", "/system_root", "/system_dlkm", nullptr
+	};
+	for (int i = 0; main_mounts[i] != nullptr; i++) {
+		if (umount2(main_mounts[i], MNT_DETACH) == 0) {
+			LOGINFO("MNT_DETACH unmounted main mount: %s\n", main_mounts[i]);
+		}
+	}
+		TWFunc::Exec_Cmd("umount -f -R /vendor 2>/dev/null || true; umount -f -R /vendor_dlkm 2>/dev/null || true; umount -f -R /system 2>/dev/null || true; umount -f -R /system_ext 2>/dev/null || true; umount -f -R /product 2>/dev/null || true; umount -f -R /odm 2>/dev/null || true");
+
 	for (auto iter = Partitions.begin(); iter != Partitions.end();) {
 		LOGINFO("Checking partition: %s\n", (*iter)->Get_Mount_Point().c_str());
 		if ((*iter)->Is_Super) {
@@ -3966,6 +4264,16 @@ bool TWPartitionManager::Unmap_Super_Devices() {
 			(*iter)->UnMount(false);
 			LOGINFO("removing dynamic partition: %s\n", blk_device_partition.c_str());
 			destroyed = DestroyLogicalPartition(blk_device_partition);
+			if (!destroyed) {
+				// Retry after a short delay - sometimes unmount is still in progress
+				usleep(500000);
+				destroyed = DestroyLogicalPartition(blk_device_partition);
+					if (!destroyed) {
+							LOGINFO("Failed to destroy logical partition %s, continuing anyway.\n", blk_device_partition.c_str());
+						// Don't block formatting - recovery process may hold references to vendor HAL libs
+						destroyed = true;
+					}
+			}
 			std::string cow_partition = blk_device_partition + "-cow";
 			std::string cow_partition_path = "/dev/block/mapper/" + cow_partition;
 			struct stat st;
@@ -3994,8 +4302,14 @@ bool TWPartitionManager::Unmap_Super_Devices() {
 					LOGINFO("removing dynamic partition: %s\n", partition.c_str());
 					destroyed = DestroyLogicalPartition(partition);
 					if (!destroyed) {
-						closedir(d);
-						return false;
+						// Retry after delay
+						usleep(500000);
+						destroyed = DestroyLogicalPartition(partition);
+						if (!destroyed) {
+								LOGINFO("Failed to destroy logical partition %s, continuing anyway.\n", partition.c_str());
+							// Don't block formatting - recovery process may hold references to vendor HAL libs
+							destroyed = true;
+						}
 					}
 				}
 			}
@@ -4005,16 +4319,153 @@ bool TWPartitionManager::Unmap_Super_Devices() {
 	return true;
 }
 
+bool TWPartitionManager::Repair_Super_Metadata_Size(bool Display_Info) {
+	using android::fs_mgr::BlockDeviceInfo;
+	using android::fs_mgr::GetBlockDevicePartitionName;
+	using android::fs_mgr::LpMetadata;
+	using android::fs_mgr::PartitionOpener;
+	using android::fs_mgr::ReadMetadata;
+	using android::fs_mgr::UpdatePartitionTable;
+
+	PartitionOpener opener;
+	BlockDeviceInfo super_info;
+	if (!opener.GetInfo("super", &super_info) || super_info.size == 0) {
+		LOGINFO("LP capacity check skipped: physical super device is unavailable.\n");
+		return true;
+	}
+
+	auto first = ReadMetadata(opener, "super", 0);
+	if (!first) {
+		LOGERR("LP capacity check failed: metadata slot 0 is unreadable.\n");
+		if (Display_Info)
+			gui_err("super_metadata_unreadable=Unable to read logical partition metadata.");
+		return false;
+	}
+
+	const uint32_t slot_count = first->geometry.metadata_slot_count;
+	const uint32_t supported_slot_count = slot_count > 1 ? 2 : 1;
+	const uint32_t required_slots = supported_slot_count;
+	std::vector<std::pair<uint32_t, std::unique_ptr<LpMetadata>>> slots;
+	slots.emplace_back(0, std::move(first));
+
+	if (slot_count > supported_slot_count) {
+		LOGINFO("LP capacity check: ignoring %u extra metadata slot(s); this liblp supports slots 0 and 1.\n",
+		        slot_count - supported_slot_count);
+	}
+
+	for (uint32_t slot = 1; slot < supported_slot_count; ++slot) {
+		auto metadata = ReadMetadata(opener, "super", slot);
+		if (metadata)
+			slots.emplace_back(slot, std::move(metadata));
+		else
+			LOGINFO("LP capacity check: metadata slot %u is unused or unreadable.\n", slot);
+	}
+
+	if (slots.size() < required_slots) {
+		LOGERR("LP capacity check failed: only %zu of %u required metadata slots are readable.\n",
+		       slots.size(), required_slots);
+		if (Display_Info)
+			gui_err("super_metadata_slots_missing=Required logical partition metadata slots are missing.");
+		return false;
+	}
+
+	bool needs_repair = false;
+	for (const auto& entry : slots) {
+		const auto& metadata = entry.second;
+		if (metadata->block_devices.size() != 1 ||
+		    GetBlockDevicePartitionName(metadata->block_devices[0]) != "super") {
+			LOGINFO("LP capacity check skipped: slot %u uses a multi-device or retrofit super layout.\n",
+			        entry.first);
+			return true;
+		}
+
+		const uint64_t declared_size = metadata->block_devices[0].size;
+		if (declared_size > super_info.size) {
+			LOGERR("LP metadata slot %u declares %" PRIu64
+			       " bytes, larger than physical super (%" PRIu64 " bytes).\n",
+			       entry.first, declared_size, super_info.size);
+			if (Display_Info)
+				gui_err("super_metadata_too_large=Logical partition metadata is larger than the physical Super partition.");
+			return false;
+		}
+		if (declared_size < super_info.size)
+			needs_repair = true;
+	}
+
+	if (!needs_repair) {
+		LOGINFO("LP capacity check passed: metadata and physical super are both %" PRIu64 " bytes.\n",
+		        super_info.size);
+		return true;
+	}
+
+	if (android::base::GetBoolProperty("ro.virtual_ab.enabled", false)) {
+		TWPartition* metadata_partition = Find_Partition_By_Path("/metadata");
+		if (!metadata_partition || !metadata_partition->Mount(false)) {
+			LOGERR("LP capacity repair refused: metadata partition is unavailable.\n");
+			if (Display_Info)
+				gui_err("super_repair_metadata_mount=Unable to mount Metadata; LP capacity repair was cancelled.");
+			return false;
+		}
+
+		auto snapshot_manager = android::snapshot::SnapshotManager::NewForFirstStageMount();
+		if (!snapshot_manager ||
+		    snapshot_manager->GetUpdateState() != android::snapshot::UpdateState::None) {
+			LOGERR("LP capacity repair refused: a Virtual A/B update or merge may be active.\n");
+			if (Display_Info)
+				gui_err("super_repair_snapshot_active=Virtual A/B update state is not idle; LP capacity repair was cancelled.");
+			return false;
+		}
+	}
+
+	if (Display_Info) {
+		gui_msg(Msg(msg::kHighlight,
+		            "repair_super_capacity=Repairing LP metadata capacity to {1} bytes...")
+		                (std::to_string(super_info.size)));
+	}
+
+	for (auto& entry : slots) {
+		auto& metadata = entry.second;
+		if (metadata->block_devices[0].size == super_info.size)
+			continue;
+
+		const uint64_t old_size = metadata->block_devices[0].size;
+		metadata->block_devices[0].size = super_info.size;
+		if (!UpdatePartitionTable(opener, "super", *metadata, entry.first)) {
+			LOGERR("Failed to repair LP metadata slot %u (%" PRIu64 " -> %" PRIu64 " bytes).\n",
+			       entry.first, old_size, super_info.size);
+			if (Display_Info)
+				gui_err("super_repair_write_failed=Failed to write repaired logical partition metadata.");
+			return false;
+		}
+
+		auto verify = ReadMetadata(opener, "super", entry.first);
+		if (!verify || verify->block_devices.size() != 1 ||
+		    verify->block_devices[0].size != super_info.size) {
+			LOGERR("LP metadata slot %u did not verify after repair.\n", entry.first);
+			if (Display_Info)
+				gui_err("super_repair_verify_failed=Logical partition metadata verification failed after repair.");
+			return false;
+		}
+		LOGINFO("Repaired LP metadata slot %u: %" PRIu64 " -> %" PRIu64 " bytes.\n",
+		        entry.first, old_size, super_info.size);
+	}
+
+	sync();
+	if (Display_Info)
+		gui_msg("super_repair_done=LP metadata capacity repaired and verified.");
+	return true;
+}
+
 
 bool TWPartitionManager::Check_Pending_Merges() {
 	auto sm = android::snapshot::SnapshotManager::NewForFirstStageMount();
 	if (!sm) {
-		LOGERR("Unable to call snapshot manager\n");
+		LOGINFO("Unable to call snapshot manager\n");
 		return false;
 	}
 
 	if (!Unmap_Super_Devices()) {
-		LOGERR("Unable to unmap dynamic partitions.\n");
+		LOGINFO("Unable to unmap dynamic partitions.\n");
 		return false;
 	}
 
@@ -4026,7 +4477,7 @@ bool TWPartitionManager::Check_Pending_Merges() {
 
 	LOGINFO("checking for merges\n");
 	if (!sm->HandleImminentDataWipe(callback)) {
-		LOGERR("Unable to check merge status\n");
+		LOGINFO("Unable to check merge status\n");
 		return false;
 	}
 	return true;

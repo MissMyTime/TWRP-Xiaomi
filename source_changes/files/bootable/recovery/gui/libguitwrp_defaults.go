@@ -280,6 +280,9 @@ func globalFlags(ctx android.BaseContext) []string {
     if getMakeVars(ctx, "TW_ROUND_SCREEN") == "true" {
         cflags = append(cflags, "-DTW_ROUND_SCREEN")
     }
+    if getMakeVars(ctx, "TW_FORCE_STOCK_THEME_ON_BOOT") == "true" {
+        cflags = append(cflags, "-DTW_FORCE_STOCK_THEME_ON_BOOT")
+    }
     for _, item := range []string{"TW_X_OFFSET", "TW_Y_OFFSET", "TW_W_OFFSET", "TW_H_OFFSET"} {
         if getMakeVars(ctx, item) != "" {
             cflags = append(cflags, "-D"+item+"="+getMakeVars(ctx, item))
